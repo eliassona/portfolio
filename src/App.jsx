@@ -55,6 +55,7 @@ export default function App() {
   const holdings = holdingsData.map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
   const [prices, setPrices]           = useState({});
+  const [dividends, setDividends]     = useState([]);
   const [usdSekRate, setUsdSekRate]   = useState(10.35);
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetched, setLastFetched] = useState(null);
@@ -123,6 +124,80 @@ export default function App() {
     } catch { return 10.35; }
   };
 
+  // ── Dividends: Finnhub + manual fallback ─────────────────────────────────
+  // Fetches upcoming dividends from Finnhub for each stock symbol.
+  // For symbols where Finnhub has nothing (e.g. newly listed preferreds like STRC/STRD/STRF),
+  // falls back to dividendPerShare + dividendFrequency fields on the holding in holdings.json.
+  const fetchDividends = async (stockSymbols) => {
+    const today    = new Date();
+    const in30days = new Date(today.getTime() + 30 * 86400 * 1000);
+    const from     = today.toISOString().slice(0, 10);
+    const to       = in30days.toISOString().slice(0, 10);
+
+    // Track which symbols Finnhub returned data for
+    const symbolsWithFinnhubData = new Set();
+    const results = [];
+
+    for (const sym of stockSymbols) {
+      try {
+        const res  = await fetch(`https://finnhub.io/api/v1/stock/dividend2?symbol=${sym}&from=${from}&to=${to}&token=${FINNHUB_KEY}`);
+        const data = await res.json();
+        if (data?.data?.length) {
+          symbolsWithFinnhubData.add(sym);
+          for (const d of data.data) {
+            results.push({ symbol: sym, source: "finnhub", ...d });
+          }
+        }
+      } catch { /* skip */ }
+      await new Promise(r => setTimeout(r, 250));
+    }
+
+    // For symbols with no Finnhub data, check if holdings.json has manual dividend info.
+    // dividendFrequency: "monthly" | "quarterly" — we show it if a payment falls in the next 30 days.
+    // For monthly: always show (payment is this month or next).
+    // For quarterly: show if today is within 30 days of the next expected payment.
+    const today0 = new Date(); today0.setHours(0,0,0,0);
+    for (const h of holdings) {
+      if (h.type !== "stock") continue;
+      const sym = h.priceSymbol ?? h.symbol;
+      if (symbolsWithFinnhubData.has(sym)) continue;
+      if (!h.dividendPerShare) continue;
+
+      const freq = h.dividendFrequency ?? "quarterly";
+      let withinWindow = false;
+      let approxDate = null;
+
+      if (freq === "monthly") {
+        // Monthly payers always have a payment within 30 days
+        withinWindow = true;
+        // Approximate: end of current month
+        approxDate = new Date(today0.getFullYear(), today0.getMonth() + 1, 0).toISOString().slice(0, 10);
+      } else if (freq === "quarterly") {
+        // Quarterly: check if a quarter-end falls within 30 days
+        // Quarter ends: Mar 31, Jun 30, Sep 30, Dec 31
+        const quarterEnds = [
+          new Date(today0.getFullYear(), 2,  31),
+          new Date(today0.getFullYear(), 5,  30),
+          new Date(today0.getFullYear(), 8,  30),
+          new Date(today0.getFullYear(), 11, 31),
+        ];
+        for (const qe of quarterEnds) {
+          const diff = (qe - today0) / 86400000;
+          if (diff >= 0 && diff <= 30) { withinWindow = true; approxDate = qe.toISOString().slice(0, 10); break; }
+        }
+      }
+
+      if (withinWindow) {
+        // Only push one entry per symbol (multiple holdings of same symbol handled in render)
+        if (!results.find(r => r.symbol === sym && r.source === "manual")) {
+          results.push({ symbol: sym, source: "manual", amount: h.dividendPerShare, exDate: approxDate, frequency: freq });
+        }
+      }
+    }
+
+    return results;
+  };
+
   // ── Fetch all, deduplicating by priceKey ───────────────────────────────────
   const fetchAll = useCallback(async () => {
     setFetchStatus("loading");
@@ -178,6 +253,12 @@ export default function App() {
       }
 
       setPrices(results);
+
+      // Fetch dividends for unique stock symbols (deduplicated, skip ETF aliases)
+      const uniqueStockSymbols = [...new Set(stockHoldings.map(h => h.priceSymbol ?? h.symbol))];
+      const divResults = await fetchDividends(uniqueStockSymbols);
+      setDividends(divResults);
+
       setFetchStatus("done");
       setLastFetched(new Date());
     } catch (err) {
@@ -403,6 +484,54 @@ export default function App() {
                 </div>
               ) : (
                 <p style={{ color: "#374151", fontSize: 12, margin: 0, textAlign: "center" }}>{isLoading ? "Loading…" : "Refresh to load"}</p>
+              )}
+            </div>
+
+            {/* Upcoming dividends */}
+            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Upcoming Dividends</h2>
+              <p style={{ margin: "0 0 12px", fontSize: 10, color: "#4b5563" }}>Next 30 days</p>
+              {isLoading ? (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {[1,2].map(i => <div key={i} style={{ height: 36, borderRadius: 8, background: "rgba(255,255,255,0.04)", animation: "pulse 1.5s infinite" }} />)}
+                </div>
+              ) : dividends.length === 0 ? (
+                <p style={{ color: "#374151", fontSize: 12, margin: 0, textAlign: "center" }}>No dividends in next 30 days</p>
+              ) : (
+                <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                  {(() => {
+                    // Group by symbol, sum payout across all holdings of that symbol
+                    const bySymbol = {};
+                    for (const div of dividends) {
+                      const amountUSD = div.amount ?? 0;
+                      const totalShares = holdings
+                        .filter(h => h.type === "stock" && (h.priceSymbol ?? h.symbol) === div.symbol)
+                        .reduce((s, h) => s + h.shares, 0);
+                      const payoutSEK = amountUSD * totalShares * usdSekRate;
+                      if (!bySymbol[div.symbol]) {
+                        bySymbol[div.symbol] = { symbol: div.symbol, exDate: div.exDate, payoutSEK: 0, amountUSD, source: div.source, frequency: div.frequency };
+                      }
+                      bySymbol[div.symbol].payoutSEK += payoutSEK;
+                    }
+                    return Object.values(bySymbol).sort((a, b) => new Date(a.exDate) - new Date(b.exDate)).map(d => (
+                      <div key={d.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
+                        <div>
+                          <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{d.symbol}</div>
+                          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 2 }}>
+                            {d.source === "manual"
+                              ? <>Est. · {d.frequency ?? "quarterly"}</>
+                              : <>Ex-div {new Date(d.exDate).toLocaleDateString("sv-SE")}</>
+                            }
+                          </div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(d.payoutSEK)}</div>
+                          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>${d.amountUSD?.toFixed(4)}/share</div>
+                        </div>
+                      </div>
+                    ));
+                  })()}
+                </div>
               )}
             </div>
 
