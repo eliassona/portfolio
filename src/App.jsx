@@ -19,9 +19,9 @@ function getDisplaySymbol(h) {
   return h.symbol;
 }
 
-// What key is used to look up the price? Uses h.priceSymbol if set, else h.symbol
+// Price lookup key — includes type so "stock:BTC" and "crypto:BTC" never collide
 function getPriceKey(h) {
-  return h.priceSymbol ?? h.symbol;
+  return `${h.type}:${h.priceSymbol ?? h.symbol}`;
 }
 
 function Sparkline({ data, positive }) {
@@ -55,6 +55,7 @@ export default function App() {
   const holdings = holdingsData.map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
   const [prices, setPrices]           = useState({});
+  const [usdSekRate, setUsdSekRate]   = useState(10.35);
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetched, setLastFetched] = useState(null);
   const [animated, setAnimated]       = useState(false);
@@ -130,43 +131,50 @@ export default function App() {
       const cryptoHoldings = holdings.filter(h => h.type === "crypto");
       const forexHoldings  = holdings.filter(h => h.type === "forex");
 
-      // Deduplicate symbols so we don't fetch the same price twice
-      const uniqueStocks  = [...new Set(stockHoldings.map(getPriceKey))];
-      const uniqueCryptos = [...new Set(cryptoHoldings.map(getPriceKey))];
-      const uniqueForex   = [...new Set(forexHoldings.map(getPriceKey))];
+      // Keys are "type:symbol" so stock:BTC and crypto:BTC never collide.
+      // Deduplicate within each type separately.
+      const uniqueStockKeys  = [...new Set(stockHoldings.map(getPriceKey))];
+      const uniqueCryptoKeys = [...new Set(cryptoHoldings.map(getPriceKey))];
+      const uniqueForexKeys  = [...new Set(forexHoldings.map(getPriceKey))];
+
+      const uniqueForexSymbols = [...new Set(forexHoldings.map(h => h.priceSymbol ?? h.symbol))];
 
       const [usdSek, forexResults] = await Promise.all([
         fetchUsdSek(),
-        fetchAllForex(uniqueForex),
+        fetchAllForex(uniqueForexSymbols),
       ]);
+      setUsdSekRate(usdSek);
 
       const results = {};
 
-      for (const sym of uniqueStocks) {
+      for (const key of uniqueStockKeys) {
+        const sym = key.replace(/^stock:/, "");
         try {
           const { priceUSD, change, historyUSD } = await fetchStock(sym);
-          results[sym] = {
+          results[key] = {
             priceSEK:   priceUSD   != null ? priceUSD   * usdSek : null,
             historySEK: historyUSD != null ? historyUSD.map(v => v * usdSek) : null,
             change,
           };
         } catch {
-          results[sym] = { priceSEK: null, change: null, historySEK: null };
+          results[key] = { priceSEK: null, change: null, historySEK: null };
         }
         await new Promise(r => setTimeout(r, 250));
       }
 
-      for (const sym of uniqueCryptos) {
+      for (const key of uniqueCryptoKeys) {
+        const sym = key.replace(/^crypto:/, "");
         try {
-          results[sym] = await fetchCrypto(sym);
+          results[key] = await fetchCrypto(sym);
         } catch {
-          results[sym] = { priceSEK: null, change: null, historySEK: null };
+          results[key] = { priceSEK: null, change: null, historySEK: null };
         }
         await new Promise(r => setTimeout(r, 500));
       }
 
-      for (const sym of uniqueForex) {
-        results[sym] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
+      for (const key of uniqueForexKeys) {
+        const sym = key.replace(/^forex:/, "");
+        results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
       }
 
       setPrices(results);
@@ -191,7 +199,9 @@ export default function App() {
     const change     = p?.change     ?? null;
     const historySEK = p?.historySEK ?? null;
     const valueSEK   = priceSEK != null ? h.shares * priceSEK : null;
-    const costSEK    = h.shares * h.avgCost;
+    // avgCost may be in USD — convert to SEK if currency field says so
+    const avgCostSEK = h.currency === "USD" ? h.avgCost * usdSekRate : h.avgCost;
+    const costSEK    = h.shares * avgCostSEK;
     const gainSEK    = valueSEK != null ? valueSEK - costSEK : null;
     const gainPct    = gainSEK != null && costSEK !== 0 ? (gainSEK / costSEK) * 100 : null;
     return { ...h, priceSEK, change, historySEK, valueSEK, costSEK, gainSEK, gainPct };
