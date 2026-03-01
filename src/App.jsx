@@ -1,26 +1,37 @@
 import { useState, useEffect, useCallback } from "react";
 import holdingsData from "../holdings.json";
 
-// ─── CONFIG ──────────────────────────────────────────────────────────────────
 const FINNHUB_KEY = "cvt0nk1r01qhup0ti100cvt0nk1r01qhup0ti10g";
-// ─────────────────────────────────────────────────────────────────────────────
-
 const COLORS = ["#22d3a5", "#6366f1", "#f59e0b", "#ec4899", "#38bdf8", "#a78bfa", "#fb923c", "#34d399"];
 
+// CoinGecko ID map — add coins here as needed
+const COINGECKO_IDS = {
+  BTC: "bitcoin", ETH: "ethereum", SOL: "solana",
+  BNB: "binancecoin", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin",
+};
+
+// For each holding, what symbol should be shown in the UI?
+// Uses h.displaySymbol if set, otherwise derives from symbol+type
 function getDisplaySymbol(h) {
+  if (h.displaySymbol) return h.displaySymbol;
   if (h.type === "forex")  return h.symbol.replace("_", "/");
   if (h.type === "crypto") return h.symbol.replace(/^[^:]+:/, "").replace(/USDT$|USD$/, "");
   return h.symbol;
 }
 
+// What key is used to look up the price? Uses h.priceSymbol if set, else h.symbol
+function getPriceKey(h) {
+  return h.priceSymbol ?? h.symbol;
+}
+
 function Sparkline({ data, positive }) {
   if (!data || data.length < 2) return <div style={{ width: 80, height: 32 }} />;
-  const w = 80, h = 32;
+  const w = 80, hh = 32;
   const min = Math.min(...data), max = Math.max(...data);
   const range = max - min || 1;
-  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${h - ((v - min) / range) * (h - 4) - 2}`).join(" ");
+  const pts = data.map((v, i) => `${(i / (data.length - 1)) * w},${hh - ((v - min) / range) * (hh - 4) - 2}`).join(" ");
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}>
+    <svg width={w} height={hh} viewBox={`0 0 ${w} ${hh}`}>
       <polyline points={pts} fill="none" stroke={positive ? "#22d3a5" : "#f87171"} strokeWidth="1.5" strokeLinejoin="round" opacity="0.85" />
     </svg>
   );
@@ -50,9 +61,9 @@ export default function App() {
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
-  // ── STOCK via Finnhub ──────────────────────────────────────────────────────
+  // ── Stock via Finnhub ──────────────────────────────────────────────────────
   const fetchStock = async (symbol) => {
-    const now  = Math.floor(Date.now() / 1000);
+    const now = Math.floor(Date.now() / 1000);
     const from = now - 30 * 86400;
     const [quoteRes, candleRes] = await Promise.all([
       fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`),
@@ -60,124 +71,102 @@ export default function App() {
     ]);
     const quote  = await quoteRes.json();
     const candle = await candleRes.json();
-    const priceSEK  = null; // USD price, will be converted using forex rate below
-    const priceUSD  = quote.c ?? null;
-    const prevUSD   = quote.pc ?? null;
-    const change    = priceUSD != null && prevUSD != null && prevUSD !== 0
-      ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
+    const priceUSD   = quote.c ?? null;
+    const prevUSD    = quote.pc ?? null;
+    const change     = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
     const historyUSD = candle.s === "ok" ? candle.c : null;
     return { priceUSD, change, historyUSD };
   };
 
-  // ── CRYPTO via CoinGecko (free, no auth, returns SEK directly) ─────────────
-  // coingeckoId map — add more as needed
-  const COINGECKO_IDS = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", BNB: "binancecoin", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin" };
-
+  // ── Crypto via CoinGecko ───────────────────────────────────────────────────
   const fetchCrypto = async (symbol) => {
     const id = COINGECKO_IDS[symbol];
     if (!id) return { priceSEK: null, change: null, historySEK: null };
-
     const [priceRes, historyRes] = await Promise.all([
       fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=sek&include_24hr_change=true`),
       fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=sek&days=30&interval=daily`)
     ]);
     const priceData   = await priceRes.json();
     const historyData = await historyRes.json();
-
-    const priceSEK = priceData?.[id]?.sek ?? null;
-    const change   = priceData?.[id]?.sek_24h_change ?? null;
-    const historySEK = historyData?.prices ? historyData.prices.map(([, p]) => p) : null;
-    return { priceSEK, change, historySEK };
+    return {
+      priceSEK:   priceData?.[id]?.sek ?? null,
+      change:     priceData?.[id]?.sek_24h_change ?? null,
+      historySEK: historyData?.prices ? historyData.prices.map(([, p]) => p) : null,
+    };
   };
 
-  // ── FOREX via Frankfurter (free, no auth, returns rates vs SEK) ────────────
-  // symbol format in holdings.json: "USD", "JPY", "EUR", "GBP" etc.
-  // Frankfurter uses EUR as base only, so we fetch EUR→everything and compute cross rates
-  const fetchAllForex = async (forexHoldings) => {
-    if (!forexHoldings.length) return {};
-    const symbols = forexHoldings.map(h => h.symbol);
-    // Always include SEK in the list so we can compute rates to SEK
+  // ── Forex via Frankfurter ──────────────────────────────────────────────────
+  const fetchAllForex = async (symbols) => {
+    if (!symbols.length) return {};
     const allSyms = [...new Set([...symbols, "SEK"])].join(",");
     try {
-      // Get latest rates with EUR as base
-      const [latestRes, prevRes] = await Promise.all([
-        fetch(`https://api.frankfurter.app/latest?to=${allSyms}`),
-        fetch(`https://api.frankfurter.app/latest?to=${allSyms}`) // same endpoint, no prev day on free
-      ]);
-      const latest = await latestRes.json();
-      // rates are "how many X per 1 EUR"
-      const rates = latest.rates ?? {};
-      rates["EUR"] = 1; // EUR is the base
-
-      // Convert any currency → SEK: (1 / rateToEUR) * rateSEKToEUR
+      const res    = await fetch(`https://api.frankfurter.app/latest?to=${allSyms}`);
+      const latest = await res.json();
+      const rates  = { ...(latest.rates ?? {}), EUR: 1 };
       const sekPerEur = rates["SEK"] ?? 1;
-      const results = {};
-      for (const sym of symbols) {
+      return Object.fromEntries(symbols.map(sym => {
         const rateToEur = rates[sym] ?? null;
-        if (rateToEur == null) { results[sym] = { priceSEK: null, change: null, historySEK: null }; continue; }
-        // priceSEK = how many SEK per 1 unit of sym
-        const priceSEK = sekPerEur / rateToEur;
-        results[sym] = { priceSEK, change: null, historySEK: null };
-      }
-      return results;
+        return [sym, { priceSEK: rateToEur != null ? sekPerEur / rateToEur : null, change: null, historySEK: null }];
+      }));
     } catch {
       return Object.fromEntries(symbols.map(s => [s, { priceSEK: null, change: null, historySEK: null }]));
     }
   };
 
-  // ── Fetch USD/SEK rate for stock conversion ────────────────────────────────
+  // ── USD/SEK via Frankfurter ────────────────────────────────────────────────
   const fetchUsdSek = async () => {
     try {
-      const res  = await fetch("https://api.frankfurter.app/latest?to=SEK&from=USD");
+      const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK");
       const data = await res.json();
       return data?.rates?.SEK ?? 10.35;
-    } catch {
-      return 10.35;
-    }
+    } catch { return 10.35; }
   };
 
-  // ── Fetch everything ───────────────────────────────────────────────────────
+  // ── Fetch all, deduplicating by priceKey ───────────────────────────────────
   const fetchAll = useCallback(async () => {
     setFetchStatus("loading");
     try {
-      const stocks = holdings.filter(h => h.type === "stock");
-      const cryptos = holdings.filter(h => h.type === "crypto");
-      const forexes = holdings.filter(h => h.type === "forex");
+      const stockHoldings  = holdings.filter(h => h.type === "stock");
+      const cryptoHoldings = holdings.filter(h => h.type === "crypto");
+      const forexHoldings  = holdings.filter(h => h.type === "forex");
 
-      // Fetch USD/SEK and all forex rates together
+      // Deduplicate symbols so we don't fetch the same price twice
+      const uniqueStocks  = [...new Set(stockHoldings.map(getPriceKey))];
+      const uniqueCryptos = [...new Set(cryptoHoldings.map(getPriceKey))];
+      const uniqueForex   = [...new Set(forexHoldings.map(getPriceKey))];
+
       const [usdSek, forexResults] = await Promise.all([
         fetchUsdSek(),
-        fetchAllForex(forexes)
+        fetchAllForex(uniqueForex),
       ]);
 
       const results = {};
 
-      // Stocks (staggered to respect Finnhub rate limit)
-      for (const h of stocks) {
+      for (const sym of uniqueStocks) {
         try {
-          const { priceUSD, change, historyUSD } = await fetchStock(h.symbol);
-          const priceSEK   = priceUSD  != null ? priceUSD  * usdSek : null;
-          const historySEK = historyUSD != null ? historyUSD.map(v => v * usdSek) : null;
-          results[h.symbol] = { priceSEK, change, historySEK };
+          const { priceUSD, change, historyUSD } = await fetchStock(sym);
+          results[sym] = {
+            priceSEK:   priceUSD   != null ? priceUSD   * usdSek : null,
+            historySEK: historyUSD != null ? historyUSD.map(v => v * usdSek) : null,
+            change,
+          };
         } catch {
-          results[h.symbol] = { priceSEK: null, change: null, historySEK: null };
+          results[sym] = { priceSEK: null, change: null, historySEK: null };
         }
         await new Promise(r => setTimeout(r, 250));
       }
 
-      // Crypto (staggered to respect CoinGecko rate limit)
-      for (const h of cryptos) {
+      for (const sym of uniqueCryptos) {
         try {
-          results[h.symbol] = await fetchCrypto(h.symbol);
+          results[sym] = await fetchCrypto(sym);
         } catch {
-          results[h.symbol] = { priceSEK: null, change: null, historySEK: null };
+          results[sym] = { priceSEK: null, change: null, historySEK: null };
         }
-        await new Promise(r => setTimeout(r, 500)); // CoinGecko is more sensitive to rate limits
+        await new Promise(r => setTimeout(r, 500));
       }
 
-      // Forex
-      for (const h of forexes) {
-        results[h.symbol] = forexResults[h.symbol] ?? { priceSEK: null, change: null, historySEK: null };
+      for (const sym of uniqueForex) {
+        results[sym] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
       }
 
       setPrices(results);
@@ -191,16 +180,15 @@ export default function App() {
 
   useEffect(() => { fetchAll(); }, []); // eslint-disable-line
 
-  // ── Formatters ─────────────────────────────────────────────────────────────
   const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 
-  // ── Enrich ─────────────────────────────────────────────────────────────────
+  // ── Enrich each holding with live price data ───────────────────────────────
   const enriched = holdings.map(h => {
-    const p          = prices[h.symbol];
-    const priceSEK   = p?.priceSEK ?? null;
-    const change     = p?.change ?? null;
+    const p          = prices[getPriceKey(h)];
+    const priceSEK   = p?.priceSEK   ?? null;
+    const change     = p?.change     ?? null;
     const historySEK = p?.historySEK ?? null;
     const valueSEK   = priceSEK != null ? h.shares * priceSEK : null;
     const costSEK    = h.shares * h.avgCost;
@@ -208,6 +196,21 @@ export default function App() {
     const gainPct    = gainSEK != null && costSEK !== 0 ? (gainSEK / costSEK) * 100 : null;
     return { ...h, priceSEK, change, historySEK, valueSEK, costSEK, gainSEK, gainPct };
   });
+
+  // ── Allocation: group by displaySymbol and sum valueSEK ───────────────────
+  const allocationGroups = (() => {
+    const map = new Map();
+    for (const h of enriched) {
+      const key = getDisplaySymbol(h);
+      if (!map.has(key)) {
+        map.set(key, { label: key, valueSEK: 0, costSEK: 0, color: h.color });
+      }
+      const g = map.get(key);
+      g.valueSEK += h.valueSEK ?? h.costSEK; // fall back to cost if no price yet
+      g.costSEK  += h.costSEK;
+    }
+    return [...map.values()].sort((a, b) => b.valueSEK - a.valueSEK);
+  })();
 
   const totalValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
   const totalCost    = enriched.reduce((s, h) => s + h.costSEK, 0);
@@ -225,7 +228,7 @@ export default function App() {
   const cryptoRows = enriched.filter(h => h.type === "crypto");
   const forexRows  = enriched.filter(h => h.type === "forex");
 
-  // ── Table ──────────────────────────────────────────────────────────────────
+  // ── Holdings table ─────────────────────────────────────────────────────────
   const HoldingsTable = ({ rows, title, sourceLabel }) => (
     <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
       <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -235,7 +238,7 @@ export default function App() {
       <table style={{ width: "100%", borderCollapse: "collapse" }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            {["Asset", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", "30D"].map(col => (
+            {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", "30D"].map(col => (
               <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
             ))}
           </tr>
@@ -252,9 +255,15 @@ export default function App() {
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, color: h.color, flexShrink: 0 }}>{label[0]}</div>
                     <div>
                       <div style={{ fontWeight: 600, fontSize: 12, fontFamily: "'DM Mono',monospace" }}>{label}</div>
-                      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1, maxWidth: 130, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.name}</div>
+                      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1, maxWidth: 120, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{h.name}</div>
                     </div>
                   </div>
+                </td>
+                <td style={{ padding: "12px 14px" }}>
+                  {h.account
+                    ? <span style={{ fontSize: 10, color: "#6b7280", background: "rgba(255,255,255,0.06)", padding: "2px 7px", borderRadius: 5 }}>{h.account}</span>
+                    : <span style={{ fontSize: 10, color: "#374151" }}>—</span>
+                  }
                 </td>
                 <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12 }}>{h.shares.toLocaleString("sv-SE")}</td>
                 <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#6b7280" }}>{fmtSEKFull(h.avgCost)}</td>
@@ -303,7 +312,6 @@ export default function App() {
         @keyframes spin { to { transform: rotate(360deg); } }
       `}</style>
 
-      {/* Header */}
       <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "18px 48px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(255,255,255,0.015)", backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 50 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg,#22d3a5,#6366f1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
@@ -323,8 +331,7 @@ export default function App() {
         </div>
       </div>
 
-      <div style={{ padding: "36px 48px", maxWidth: 1300, margin: "0 auto" }}>
-        {/* Metrics */}
+      <div style={{ padding: "36px 48px", maxWidth: 1400, margin: "0 auto" }}>
         <div className={`fade-in ${animated ? "visible" : ""}`} style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 26 }}>
           <MetricCard label="Total Value"  value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={`${holdings.length} positions`} accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
           <MetricCard label="Total Return" value={fmtSEK(totalGain)}  sub={fmtPct(totalGainPct) + " all time"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
@@ -339,21 +346,24 @@ export default function App() {
             {forexRows.length  > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" />}
           </div>
 
-          {/* Right panel */}
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+            {/* Allocation — grouped by display symbol */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "120ms" }}>
               <h2 style={{ margin: "0 0 18px", fontSize: 13, fontWeight: 600 }}>Allocation</h2>
               <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-                {enriched.map(h => {
-                  const pct = totalValue > 0 ? ((h.valueSEK ?? h.costSEK) / totalValue) * 100 : 0;
+                {allocationGroups.map((g, i) => {
+                  const pct = totalValue > 0 ? (g.valueSEK / totalValue) * 100 : 0;
                   return (
-                    <div key={h.id}>
+                    <div key={g.label}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: "#d1d5db" }}>{getDisplaySymbol(h)}</span>
-                        <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#6b7280" }}>{pct.toFixed(1)}%</span>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: "#d1d5db" }}>{g.label}</span>
+                        <div style={{ textAlign: "right" }}>
+                          <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#6b7280" }}>{pct.toFixed(1)}%</span>
+                          <span style={{ fontSize: 10, color: "#374151", marginLeft: 6 }}>{fmtSEK(g.valueSEK)}</span>
+                        </div>
                       </div>
                       <div style={{ height: 5, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: h.color, borderRadius: 4, transition: "width 0.9s cubic-bezier(0.4,0,0.2,1) 200ms" }} />
+                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: g.color, borderRadius: 4, transition: `width 0.9s cubic-bezier(0.4,0,0.2,1) ${i * 60}ms` }} />
                       </div>
                     </div>
                   );
@@ -361,6 +371,7 @@ export default function App() {
               </div>
             </div>
 
+            {/* Performance */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "160ms" }}>
               <h2 style={{ margin: "0 0 16px", fontSize: 13, fontWeight: 600 }}>Performance</h2>
               {priced.length > 0 ? (

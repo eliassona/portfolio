@@ -2,43 +2,49 @@
 
 Live stocks, crypto & currency tracker in SEK.
 
-## APIs used (all free, no auth required)
-- **Stocks** → Finnhub (`/quote` + `/stock/candle`)
-- **Crypto** → CoinGecko (`/simple/price` + `/coins/{id}/market_chart`)
-- **Forex**  → Frankfurter (`/latest`) — ECB exchange rates
+## APIs (all free, no auth)
+- **Stocks** → Finnhub
+- **Crypto** → CoinGecko (returns SEK directly, includes 30-day history)
+- **Forex**  → Frankfurter (ECB rates)
 
 ## Setup
 ```bash
 npm install && npm run dev
 ```
-- Local:   http://localhost:5173
-- Network: http://192.168.x.x:5173
 
-## holdings.json format
+## holdings.json fields
 
-### Stocks — use standard ticker
+| Field           | Required | Description |
+|-----------------|----------|-------------|
+| `symbol`        | ✅       | Ticker / currency code (see below) |
+| `name`          | ✅       | Display name |
+| `shares`        | ✅       | Quantity held |
+| `avgCost`       | ✅       | Average purchase price in SEK |
+| `type`          | ✅       | `"stock"`, `"crypto"`, or `"forex"` |
+| `account`       | —        | Optional label shown in the table (e.g. "ISK", "Coinbase") |
+| `priceSymbol`   | —        | Override which symbol is used to fetch the price (see BTC clash below) |
+| `displaySymbol` | —        | Override the symbol shown in the UI |
+
+## Multiple entries of the same symbol
+Just add multiple rows — the holdings table shows each row individually (with account),
+and the allocation panel on the right automatically sums them by display symbol.
+
 ```json
-{ "symbol": "AAPL",      "name": "Apple",   "shares": 10,  "avgCost": 1540, "type": "stock" }
-{ "symbol": "VOLV-B.ST", "name": "Volvo B", "shares": 100, "avgCost": 280,  "type": "stock" }
+{ "symbol": "AAPL", "shares": 25, "avgCost": 1540, "type": "stock", "account": "ISK" },
+{ "symbol": "AAPL", "shares": 10, "avgCost": 1620, "type": "stock", "account": "KF"  }
 ```
 
-### Crypto — use ticker symbol (BTC, ETH, SOL, BNB, XRP, ADA, DOGE supported)
+## Resolving symbol clashes (e.g. BTC the ETF vs BTC the crypto)
+Use `priceSymbol` and `displaySymbol` to disambiguate:
+
 ```json
-{ "symbol": "BTC", "name": "Bitcoin",  "shares": 0.5, "avgCost": 350000, "type": "crypto" }
-{ "symbol": "ETH", "name": "Ethereum", "shares": 2.0, "avgCost": 28000,  "type": "crypto" }
+{ "symbol": "BTC",  "name": "Bitcoin",                   "type": "crypto" },
+{ "symbol": "BTC2", "name": "Grayscale BTC Mini Trust",  "type": "stock",
+  "priceSymbol": "BTC", "displaySymbol": "BTC2" }
 ```
+The ETF entry uses `"BTC"` as its Finnhub ticker (`priceSymbol`) but shows as `"BTC2"` in the UI,
+so it won't collide with real Bitcoin in the allocation panel.
 
-### Forex — use ISO 4217 currency code
-```json
-{ "symbol": "USD", "name": "US Dollar",    "shares": 10000,  "avgCost": 10.20, "type": "forex" }
-{ "symbol": "JPY", "name": "Japanese Yen", "shares": 500000, "avgCost": 0.068, "type": "forex" }
-{ "symbol": "EUR", "name": "Euro",         "shares": 5000,   "avgCost": 11.30, "type": "forex" }
-```
-`shares` = units of currency held · `avgCost` = SEK paid per unit
-
-## To add more crypto
-Edit the `COINGECKO_IDS` map in `src/App.jsx` to add new coins:
-```js
-const COINGECKO_IDS = { BTC: "bitcoin", ETH: "ethereum", SOL: "solana", ... }
-```
-Find the CoinGecko ID at coingecko.com (it's in the URL of the coin page).
+## Supported crypto symbols
+BTC, ETH, SOL, BNB, XRP, ADA, DOGE
+To add more, edit `COINGECKO_IDS` in `src/App.jsx` — find the ID at coingecko.com.
