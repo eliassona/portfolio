@@ -593,6 +593,38 @@ export default function App() {
               )}
             </div>
 
+            {/* Currency breakdown */}
+            {forexRows.length > 0 && (
+              <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
+                  <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {Object.values(
+                    forexRows.reduce((acc, h) => {
+                      const key = h.symbol;
+                      if (!acc[key]) acc[key] = { symbol: key, name: h.name, totalShares: 0, valueSEK: 0, priceSEK: h.priceSEK, color: h.color };
+                      acc[key].totalShares += h.shares;
+                      acc[key].valueSEK   += h.valueSEK ?? 0;
+                      return acc;
+                    }, {})
+                  ).sort((a, b) => b.valueSEK - a.valueSEK).map(c => (
+                    <div key={c.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                        <div style={{ width: 24, height: 24, borderRadius: 6, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${c.color}22`, color: c.color }}>{c.symbol.slice(0,3)}</div>
+                        <div>
+                          <div style={{ fontSize: 11, fontWeight: 600 }}>{c.symbol}</div>
+                          <div style={{ fontSize: 9, color: "#4b5563" }}>{c.totalShares.toLocaleString("sv-SE")} units · {c.priceSEK != null ? fmtSEKFull(c.priceSEK) : "—"}/unit</div>
+                        </div>
+                      </div>
+                      <span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(c.valueSEK)}</span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
             {/* Upcoming dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Upcoming Dividends</h2>
@@ -619,23 +651,31 @@ export default function App() {
                       }
                       bySymbol[div.symbol].payoutSEK += payoutSEK;
                     }
-                    return Object.values(bySymbol).sort((a, b) => new Date(a.exDate) - new Date(b.exDate)).map(d => (
-                      <div key={d.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
-                        <div>
-                          <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{d.symbol}</div>
-                          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 2 }}>
-                            {d.source === "manual"
-                              ? <>Est. · {d.frequency ?? "quarterly"}</>
-                              : <>Ex-div {new Date(d.exDate).toLocaleDateString("sv-SE")}</>
-                            }
+                    const rows = Object.values(bySymbol).sort((a, b) => new Date(a.exDate) - new Date(b.exDate));
+                    const grandTotal = rows.reduce((s, d) => s + d.payoutSEK, 0);
+                    return <>
+                      {rows.map(d => (
+                        <div key={d.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
+                          <div>
+                            <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{d.symbol}</div>
+                            <div style={{ fontSize: 10, color: "#4b5563", marginTop: 2 }}>
+                              {d.source === "manual"
+                                ? <>Est. · {d.frequency ?? "quarterly"}</>
+                                : <>Ex-div {new Date(d.exDate).toLocaleDateString("sv-SE")}</>
+                              }
+                            </div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(d.payoutSEK)}</div>
+                            <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>${d.amountUSD?.toFixed(4)}/share</div>
                           </div>
                         </div>
-                        <div style={{ textAlign: "right" }}>
-                          <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(d.payoutSEK)}</div>
-                          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>${d.amountUSD?.toFixed(4)}/share</div>
-                        </div>
+                      ))}
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2 }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>Total</span>
+                        <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(grandTotal)}</span>
                       </div>
-                    ));
+                    </>;
                   })()}
                 </div>
               )}
