@@ -288,21 +288,6 @@ export default function App() {
     return { ...h, priceSEK, change, historySEK, valueSEK, costSEK, gainSEK, gainPct };
   });
 
-  // ── Allocation: group by displaySymbol and sum valueSEK ───────────────────
-  const allocationGroups = (() => {
-    const map = new Map();
-    for (const h of enriched) {
-      const key = getDisplaySymbol(h);
-      if (!map.has(key)) {
-        map.set(key, { label: key, valueSEK: 0, costSEK: 0, color: h.color });
-      }
-      const g = map.get(key);
-      g.valueSEK += h.valueSEK ?? h.costSEK; // fall back to cost if no price yet
-      g.costSEK  += h.costSEK;
-    }
-    return [...map.values()].sort((a, b) => b.valueSEK - a.valueSEK);
-  })();
-
   const totalValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
   const totalCost    = enriched.reduce((s, h) => s + h.costSEK, 0);
   const totalGain    = totalValue - totalCost;
@@ -315,9 +300,128 @@ export default function App() {
   const best   = priced.length ? [...priced].sort((a, b) => b.change - a.change)[0] : null;
   const worst  = priced.length ? [...priced].sort((a, b) => a.change - b.change)[0] : null;
 
-  const stockRows  = enriched.filter(h => h.type === "stock");
-  const cryptoRows = enriched.filter(h => h.type === "crypto");
-  const forexRows  = enriched.filter(h => h.type === "forex");
+  const stockRows      = enriched.filter(h => h.type === "stock");
+  const cryptoRows     = enriched.filter(h => h.type === "crypto");
+  const forexRows      = enriched.filter(h => h.type === "forex");
+  const realEstateRows = holdingsData.filter(h => h.type === "realestate").map((h, i) => ({ ...h, id: `re-${i}`, color: COLORS[(enriched.length + i) % COLORS.length] }));
+  const debtRows       = holdingsData.filter(h => h.type === "debt").map((h, i) => ({ ...h, id: `debt-${i}`, color: "#f87171" }));
+
+  const totalRealEstate = realEstateRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+  const totalDebt       = debtRows.reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
+  const netWorth        = totalValue + totalRealEstate - totalDebt;
+
+  // ── Allocation: group by displaySymbol and sum valueSEK ───────────────────
+  const allocationTotal = totalValue + totalRealEstate;
+  const allocationGroups = (() => {
+    const map = new Map();
+    for (const h of enriched) {
+      const key = getDisplaySymbol(h);
+      if (!map.has(key)) map.set(key, { label: key, valueSEK: 0, color: h.color });
+      map.get(key).valueSEK += h.valueSEK ?? h.costSEK;
+    }
+    for (const h of realEstateRows) {
+      const key = h.name;
+      if (!map.has(key)) map.set(key, { label: key, valueSEK: 0, color: h.color });
+      map.get(key).valueSEK += h.valueSEK ?? 0;
+    }
+    return [...map.values()].sort((a, b) => b.valueSEK - a.valueSEK);
+  })();
+
+  // ── Real estate table ─────────────────────────────────────────────────────
+  const RealEstateTable = ({ rows }) => (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
+      <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Real Estate</h2>
+        <span style={{ fontSize: 10, color: "#374151" }}>{fmtSEK(totalRealEstate)} total</span>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            {["Property", "Account", "Purchase Price", "Est. Value", "Unrealised Gain", "Notes"].map(col => (
+              <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(h => {
+            const gain    = h.valueSEK != null && h.purchasePriceSEK != null ? h.valueSEK - h.purchasePriceSEK : null;
+            const gainPct = gain != null && h.purchasePriceSEK ? (gain / h.purchasePriceSEK) * 100 : null;
+            const isPos   = (gain ?? 0) >= 0;
+            return (
+              <tr key={h.id} className="row-hover" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s" }}>
+                <td style={{ padding: "12px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, flexShrink: 0 }}>🏠</div>
+                    <div>
+                      <div style={{ fontWeight: 600, fontSize: 12 }}>{h.name}</div>
+                      {h.address && <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{h.address}</div>}
+                    </div>
+                  </div>
+                </td>
+                <td style={{ padding: "12px 14px" }}>
+                  {h.account ? <span style={{ fontSize: 10, color: "#6b7280", background: "rgba(255,255,255,0.06)", padding: "2px 7px", borderRadius: 5 }}>{h.account}</span> : <span style={{ color: "#374151", fontSize: 11 }}>—</span>}
+                </td>
+                <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#6b7280" }}>{fmtSEK(h.purchasePriceSEK)}</td>
+                <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, fontWeight: 600 }}>{fmtSEK(h.valueSEK)}</td>
+                <td style={{ padding: "12px 14px" }}>
+                  {gain != null
+                    ? <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", background: isPos ? "rgba(34,211,165,0.1)" : "rgba(248,113,113,0.1)", padding: "2px 7px", borderRadius: 5 }}>
+                        {isPos ? "+" : ""}{fmtSEK(gain)} ({fmtPct(gainPct)})
+                      </span>
+                    : <span style={{ fontSize: 11, color: "#374151" }}>—</span>
+                  }
+                </td>
+                <td style={{ padding: "12px 14px", fontSize: 11, color: "#6b7280" }}>{h.notes ?? "—"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
+
+  // ── Debt table ─────────────────────────────────────────────────────────────
+  const DebtTable = ({ rows }) => (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(248,113,113,0.15)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
+      <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Debt</h2>
+        <span style={{ fontSize: 10, color: "#f87171" }}>{fmtSEK(totalDebt)} total</span>
+      </div>
+      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            {["Liability", "Lender", "Balance", "Interest Rate", "Monthly Cost", "Notes"].map(col => (
+              <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(h => {
+            const monthlyCost = h.balanceSEK != null && h.interestRate != null ? (h.balanceSEK * (h.interestRate / 100)) / 12 : null;
+            return (
+              <tr key={h.id} className="row-hover" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s" }}>
+                <td style={{ padding: "12px 14px" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                    <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(248,113,113,0.1)", flexShrink: 0 }}>💳</div>
+                    <div style={{ fontWeight: 600, fontSize: 12 }}>{h.name}</div>
+                  </div>
+                </td>
+                <td style={{ padding: "12px 14px", fontSize: 11, color: "#6b7280" }}>{h.lender ?? "—"}</td>
+                <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, fontWeight: 600, color: "#f87171" }}>{fmtSEK(h.balanceSEK)}</td>
+                <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12 }}>
+                  {h.interestRate != null ? `${h.interestRate.toFixed(2)}%` : "—"}
+                </td>
+                <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#f87171" }}>
+                  {monthlyCost != null ? fmtSEK(monthlyCost) : "—"}
+                </td>
+                <td style={{ padding: "12px 14px", fontSize: 11, color: "#6b7280" }}>{h.notes ?? "—"}</td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
+  );
 
   // ── Holdings table ─────────────────────────────────────────────────────────
   const HoldingsTable = ({ rows, title, sourceLabel }) => (
@@ -424,17 +528,19 @@ export default function App() {
 
       <div style={{ padding: "36px 48px", maxWidth: 1400, margin: "0 auto" }}>
         <div className={`fade-in ${animated ? "visible" : ""}`} style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 26 }}>
-          <MetricCard label="Total Value"  value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={`${holdings.length} positions`} accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
-          <MetricCard label="Total Return" value={fmtSEK(totalGain)}  sub={fmtPct(totalGainPct) + " all time"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
+          <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub="Assets minus debt" accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
+          <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " today"} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
-          <MetricCard label="Cost Basis"   value={fmtSEK(totalCost)}  sub="Total invested" accent="#6366f1" />
+          <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities`} accent="#f87171" />
         </div>
 
         <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 18 }}>
           <div className={`fade-in ${animated ? "visible" : ""}`} style={{ transitionDelay: "80ms" }}>
-            {stockRows.length  > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
-            {cryptoRows.length > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
-            {forexRows.length  > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" />}
+            {stockRows.length     > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
+            {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
+            {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" />}
+            {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
+            {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
@@ -443,7 +549,7 @@ export default function App() {
               <h2 style={{ margin: "0 0 18px", fontSize: 13, fontWeight: 600 }}>Allocation</h2>
               <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
                 {allocationGroups.map((g, i) => {
-                  const pct = totalValue > 0 ? (g.valueSEK / totalValue) * 100 : 0;
+                  const pct = allocationTotal > 0 ? (g.valueSEK / allocationTotal) * 100 : 0;
                   return (
                     <div key={g.label}>
                       <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
