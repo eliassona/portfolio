@@ -39,12 +39,12 @@ function Sparkline({ data, positive }) {
 
 function MetricCard({ label, value, sub, accent, loading }) {
   return (
-    <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 16, padding: "22px 26px", position: "relative", overflow: "hidden" }}>
+    <div style={{ background: "rgba(255,255,255,0.03)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 16, padding: "18px 22px", position: "relative", overflow: "hidden" }}>
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 2, background: accent }} />
       <p style={{ margin: 0, fontSize: 10, letterSpacing: "0.14em", textTransform: "uppercase", color: "#6b7280", fontWeight: 600 }}>{label}</p>
       {loading
-        ? <div style={{ margin: "10px 0 4px", height: 28, width: "60%", borderRadius: 6, background: "rgba(255,255,255,0.06)", animation: "pulse 1.5s infinite" }} />
-        : <p style={{ margin: "8px 0 4px", fontSize: 26, fontWeight: 700, fontFamily: "'DM Mono', monospace", color: "#f1f5f9", letterSpacing: "-0.02em" }}>{value}</p>
+        ? <div style={{ margin: "10px 0 4px", height: 28, width: "60%", borderRadius: 6, background: "rgba(255,255,255,0.06)",  }} />
+        : <p className="metric-value" style={{ margin: "8px 0 4px", fontWeight: 700, fontFamily: "'DM Mono', monospace", color: "#f1f5f9", letterSpacing: "-0.02em" }}>{value}</p>
       }
       {sub && <p style={{ margin: 0, fontSize: 11, color: "#6b7280" }}>{sub}</p>}
     </div>
@@ -334,7 +334,7 @@ export default function App() {
         <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Real Estate</h2>
         <span style={{ fontSize: 10, color: "#374151" }}>{fmtSEK(totalRealEstate)} total</span>
       </div>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
             {["Property", "Account", "Purchase Price", "Est. Value", "Unrealised Gain", "Notes"].map(col => (
@@ -376,7 +376,7 @@ export default function App() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 
@@ -387,7 +387,7 @@ export default function App() {
         <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Debt</h2>
         <span style={{ fontSize: 10, color: "#f87171" }}>{fmtSEK(totalDebt)} total</span>
       </div>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
             {["Liability", "Lender", "Balance", "Interest Rate", "Monthly Cost", "Notes"].map(col => (
@@ -419,7 +419,7 @@ export default function App() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 
@@ -430,7 +430,7 @@ export default function App() {
         <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{title}</h2>
         <span style={{ fontSize: 10, color: "#374151", letterSpacing: "0.06em" }}>{sourceLabel}</span>
       </div>
-      <table style={{ width: "100%", borderCollapse: "collapse" }}>
+      <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
             {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", "30D"].map(col => (
@@ -464,7 +464,7 @@ export default function App() {
                 <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#6b7280" }}>{fmtSEKFull(h.avgCost)}</td>
                 <td style={{ padding: "12px 14px" }}>
                   {isLoading
-                    ? <div style={{ height: 14, width: 60, borderRadius: 4, background: "rgba(255,255,255,0.06)", animation: "pulse 1.5s infinite" }} />
+                    ? <div style={{ height: 14, width: 60, borderRadius: 4, background: "rgba(255,255,255,0.06)",  }} />
                     : <>
                         <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 12 }}>{fmtSEKFull(h.priceSEK)}</div>
                         {h.change != null && <div style={{ fontSize: 10, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>{fmtPct(h.change)}</div>}
@@ -472,11 +472,11 @@ export default function App() {
                   }
                 </td>
                 <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, fontWeight: 600 }}>
-                  {isLoading ? <div style={{ height: 14, width: 70, borderRadius: 4, background: "rgba(255,255,255,0.06)", animation: "pulse 1.5s infinite" }} /> : fmtSEK(h.valueSEK)}
+                  {isLoading ? <div style={{ height: 14, width: 70, borderRadius: 4, background: "rgba(255,255,255,0.06)",  }} /> : fmtSEK(h.valueSEK)}
                 </td>
                 <td style={{ padding: "12px 14px" }}>
                   {isLoading
-                    ? <div style={{ height: 20, width: 100, borderRadius: 6, background: "rgba(255,255,255,0.06)", animation: "pulse 1.5s infinite" }} />
+                    ? <div style={{ height: 20, width: 100, borderRadius: 6, background: "rgba(255,255,255,0.06)",  }} />
                     : h.gainSEK != null
                       ? <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, fontWeight: 600, color: isGainPos ? "#22d3a5" : "#f87171", background: isGainPos ? "rgba(34,211,165,0.1)" : "rgba(248,113,113,0.1)", padding: "2px 7px", borderRadius: 5 }}>
                           {isGainPos ? "+" : ""}{fmtSEK(h.gainSEK)} ({fmtPct(h.gainPct)})
@@ -491,28 +491,84 @@ export default function App() {
             );
           })}
         </tbody>
-      </table>
+      </table></div>
     </div>
   );
 
   return (
-    <div style={{ minHeight: "100vh", background: "#080c14", fontFamily: "'DM Sans','Helvetica Neue',sans-serif", color: "#e2e8f0" }}>
+    <div className="app-root" style={{ fontFamily: "'DM Sans','Helvetica Neue',sans-serif", color: "#e2e8f0", background: "#080c14" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
-        * { box-sizing: border-box; } body { margin: 0; }
+
+        * { box-sizing: border-box; }
+        body { margin: 0; background: #080c14; }
+
+        /* Safari: 100vh includes browser chrome — use fill-available as fallback */
+        .app-root {
+          min-height: 100vh;
+          min-height: -webkit-fill-available;
+        }
+
         .row-hover:hover { background: rgba(255,255,255,0.04) !important; }
+
         .fade-in { opacity: 0; transform: translateY(14px); transition: opacity 0.5s ease, transform 0.5s ease; }
         .fade-in.visible { opacity: 1; transform: translateY(0); }
+
         @keyframes pulse { 0%,100%{opacity:.35} 50%{opacity:.7} }
-        @keyframes spin { to { transform: rotate(360deg); } }
+        @keyframes spin  { to { transform: rotate(360deg); } }
+        .spinning { -webkit-animation: spin 0.8s linear infinite; animation: spin 0.8s linear infinite; }
+        .pulsing  { -webkit-animation: pulse 1.5s infinite;       animation: pulse 1.5s infinite; }
+
+        /* Sticky header — Safari requires the header NOT be inside overflow:hidden */
+        .sticky-header {
+          position: -webkit-sticky;
+          position: sticky;
+          top: 0;
+          z-index: 50;
+          border-bottom: 1px solid rgba(255,255,255,0.06);
+          background: rgba(8,12,20,0.92);  /* opaque fallback for Safari backdrop-filter */
+          -webkit-backdrop-filter: blur(12px);
+          backdrop-filter: blur(12px);
+        }
+
+        .metrics-grid { display: -webkit-box; display: -ms-flexbox; display: grid; grid-template-columns: repeat(4, 1fr); gap: 14px; margin-bottom: 26px; }
+        .main-grid    { display: grid; grid-template-columns: 1fr 300px; gap: 18px; }
+
+        /* Tables: horizontal scroll on mobile */
+        .table-wrap { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+        .table-wrap table { min-width: 580px; width: 100%; border-collapse: collapse; }
+
+        /* Metric card value — fluid font size */
+        .metric-value { font-size: clamp(15px, 4vw, 26px); }
+
+        .header-inner { padding: 18px 48px; }
+        .page-inner   { padding: 36px 48px; max-width: 1400px; margin: 0 auto; }
+
+        @media (max-width: 900px) {
+          .main-grid    { grid-template-columns: 1fr; }
+          .metrics-grid { grid-template-columns: repeat(2, 1fr); }
+          .header-inner { padding: 14px 20px; }
+          .page-inner   { padding: 20px 16px; }
+        }
+        @media (max-width: 500px) {
+          .metrics-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+          .header-inner { padding: 12px 16px; }
+          .page-inner   { padding: 16px 12px; }
+          .header-title { display: none; }
+        }
+
+        /* Tap highlight removal for iOS */
+        button { -webkit-tap-highlight-color: transparent; touch-action: manipulation; }
+        a      { -webkit-tap-highlight-color: transparent; }
       `}</style>
 
-      <div style={{ borderBottom: "1px solid rgba(255,255,255,0.06)", padding: "18px 48px", display: "flex", alignItems: "center", justifyContent: "space-between", background: "rgba(255,255,255,0.015)", backdropFilter: "blur(12px)", position: "sticky", top: 0, zIndex: 50 }}>
+      <div className="sticky-header">
+        <div className="header-inner" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <div style={{ width: 32, height: 32, borderRadius: 8, background: "linear-gradient(135deg,#22d3a5,#6366f1)", display: "flex", alignItems: "center", justifyContent: "center" }}>
             <span style={{ fontSize: 14, fontWeight: 800, color: "#fff" }}>P</span>
           </div>
-          <span style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-0.02em" }}>Portfolio</span>
+          <span className="header-title" style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-0.02em" }}>Portfolio</span>
           {fetchStatus === "done"    && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(34,211,165,0.12)",  color: "#22d3a5", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Live</span>}
           {fetchStatus === "loading" && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(99,102,241,0.12)",  color: "#a5b4fc", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Fetching…</span>}
           {fetchStatus === "error"   && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(248,113,113,0.12)", color: "#f87171", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Error</span>}
@@ -520,21 +576,22 @@ export default function App() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {lastFetched && <span style={{ fontSize: 11, color: "#374151" }}>{lastFetched.toLocaleTimeString("sv-SE")}</span>}
           <button onClick={fetchAll} disabled={isLoading} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 10, padding: "7px 14px", color: "#d1d5db", fontSize: 12, fontWeight: 600, cursor: isLoading ? "not-allowed" : "pointer", fontFamily: "'DM Sans',sans-serif", opacity: isLoading ? 0.6 : 1 }}>
-            <span style={{ display: "inline-block", animation: isLoading ? "spin 0.8s linear infinite" : "none", fontSize: 14 }}>↻</span>
+            <span className={isLoading ? "spinning" : ""} style={{ display: "inline-block", fontSize: 14 }}>↻</span>
             {isLoading ? "Fetching…" : "Refresh"}
           </button>
         </div>
+        </div>
       </div>
 
-      <div style={{ padding: "36px 48px", maxWidth: 1400, margin: "0 auto" }}>
-        <div className={`fade-in ${animated ? "visible" : ""}`} style={{ display: "grid", gridTemplateColumns: "repeat(4,1fr)", gap: 14, marginBottom: 26 }}>
+      <div className="page-inner">
+        <div className={`metrics-grid fade-in ${animated ? "visible" : ""}`}>
           <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub="Assets minus debt" accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
           <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " today"} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
           <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities`} accent="#f87171" />
         </div>
 
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 300px", gap: 18 }}>
+        <div className="main-grid">
           <div className={`fade-in ${animated ? "visible" : ""}`} style={{ transitionDelay: "80ms" }}>
             {stockRows.length     > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
             {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
@@ -596,10 +653,31 @@ export default function App() {
             {/* Currency breakdown */}
             {forexRows.length > 0 && (
               <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 14 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
                   <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
                   <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
                 </div>
+                {/* Exchange rate strip */}
+                {(() => {
+                  const usdSek = prices["forex:USD"]?.priceSEK;
+                  const eurSek = prices["forex:EUR"]?.priceSEK;
+                  const jpySek = prices["forex:JPY"]?.priceSEK;
+                  const rates = [
+                    { label: "USD/SEK", value: usdSek != null ? usdSek.toFixed(2)     : "—" },
+                    { label: "EUR/SEK", value: eurSek != null ? eurSek.toFixed(2)     : "—" },
+                    { label: "SEK/JPY", value: jpySek != null ? (1/jpySek).toFixed(4) : "—" },
+                  ];
+                  return (
+                    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
+                      {rates.map(r => (
+                        <div key={r.label} style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "6px 8px", textAlign: "center" }}>
+                          <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.08em", marginBottom: 3 }}>{r.label}</div>
+                          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "\'DM Mono\',monospace", color: "#d1d5db" }}>{r.value}</div>
+                        </div>
+                      ))}
+                    </div>
+                  );
+                })()}
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                   {Object.values(
                     forexRows.reduce((acc, h) => {
@@ -631,7 +709,7 @@ export default function App() {
               <p style={{ margin: "0 0 12px", fontSize: 10, color: "#4b5563" }}>Next 30 days</p>
               {isLoading ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-                  {[1,2].map(i => <div key={i} style={{ height: 36, borderRadius: 8, background: "rgba(255,255,255,0.04)", animation: "pulse 1.5s infinite" }} />)}
+                  {[1,2].map(i => <div key={i} style={{ height: 36, borderRadius: 8, background: "rgba(255,255,255,0.04)",  }} />)}
                 </div>
               ) : dividends.length === 0 ? (
                 <p style={{ color: "#374151", fontSize: 12, margin: 0, textAlign: "center" }}>No dividends in next 30 days</p>
