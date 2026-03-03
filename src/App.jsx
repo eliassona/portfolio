@@ -1,7 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useEffect, useCallback, useRef } from "react";
 import holdingsData from "../holdings.json";
 
-const FINNHUB_KEY = "cvt0nk1r01qhup0ti100cvt0nk1r01qhup0ti10g";
+const FINNHUB_KEY      = "cvt0nk1r01qhup0ti100cvt0nk1r01qhup0ti10g";
+const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
+const ALERT_SERVER     = "http://localhost:3001";
+const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
 const COLORS = ["#22d3a5", "#6366f1", "#f59e0b", "#ec4899", "#38bdf8", "#a78bfa", "#fb923c", "#34d399"];
 
 // CoinGecko ID map — add coins here as needed
@@ -60,8 +63,25 @@ export default function App() {
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetched, setLastFetched] = useState(null);
   const [animated, setAnimated]       = useState(false);
+  const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
+
+  // Countdown ticker (no dependency on fetchAll)
+  useEffect(() => {
+    const id = setInterval(() => setCountdown(c => Math.max(0, c - 1)), 1000);
+    return () => clearInterval(id);
+  }, []);
+
+  // Track which symbols we've already alerted on today so we don't spam
+  const alertedToday = useRef(new Set());
+  useEffect(() => {
+    // Reset alerted set at midnight
+    const now   = new Date();
+    const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) - now;
+    const id = setTimeout(() => { alertedToday.current = new Set(); }, msUntilMidnight);
+    return () => clearTimeout(id);
+  }, []);
 
   // ── Stock via Finnhub ──────────────────────────────────────────────────────
   const fetchStock = async (symbol) => {
@@ -254,6 +274,35 @@ export default function App() {
 
       setPrices(results);
 
+      // Check for large movers and send email alert for any not already alerted today
+      const alertCandidates = Object.entries(results)
+        .filter(([key, p]) => {
+          if (p.change == null || Math.abs(p.change) < ALERT_THRESHOLD) return false;
+          if (alertedToday.current.has(key)) return false;
+          return true;
+        })
+        .map(([key, p]) => {
+          const h = holdings.find(h => getPriceKey(h) === key);
+          return h ? { symbol: getDisplaySymbol(h), name: h.name, change: p.change, priceSEK: p.priceSEK } : null;
+        })
+        .filter(Boolean);
+
+      if (alertCandidates.length > 0) {
+        try {
+          await fetch(`${ALERT_SERVER}/api/alert`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ alerts: alertCandidates }),
+          });
+          alertCandidates.forEach(a => alertedToday.current.add(
+            // re-derive the key from holdings to mark as alerted
+            getPriceKey(holdings.find(h => getDisplaySymbol(h) === a.symbol) ?? {type:'',symbol:''})
+          ));
+        } catch (err) {
+          console.warn('Alert server unreachable:', err.message);
+        }
+      }
+
       // Fetch dividends for unique stock symbols (deduplicated, skip ETF aliases)
       const uniqueStockSymbols = [...new Set(stockHoldings.map(h => h.priceSymbol ?? h.symbol))];
       const divResults = await fetchDividends(uniqueStockSymbols);
@@ -261,6 +310,7 @@ export default function App() {
 
       setFetchStatus("done");
       setLastFetched(new Date());
+      setCountdown(REFRESH_MS / 1000);
     } catch (err) {
       console.error("Fetch error:", err);
       setFetchStatus("error");
@@ -268,6 +318,12 @@ export default function App() {
   }, []); // eslint-disable-line
 
   useEffect(() => { fetchAll(); }, []); // eslint-disable-line
+
+  // Auto-refresh every 5 minutes — placed after fetchAll is defined
+  useEffect(() => {
+    const id = setInterval(fetchAll, REFRESH_MS);
+    return () => clearInterval(id);
+  }, [fetchAll]);
 
   const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
@@ -575,6 +631,7 @@ export default function App() {
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           {lastFetched && <span style={{ fontSize: 11, color: "#374151" }}>{lastFetched.toLocaleTimeString("sv-SE")}</span>}
+          {!isLoading && <span style={{ fontSize: 10, color: "#374151" }}>next in {Math.floor(countdown/60)}:{String(countdown%60).padStart(2,'0')}</span>}
           <button onClick={fetchAll} disabled={isLoading} style={{ display: "flex", alignItems: "center", gap: 6, background: "rgba(255,255,255,0.05)", border: "1px solid rgba(255,255,255,0.09)", borderRadius: 10, padding: "7px 14px", color: "#d1d5db", fontSize: 12, fontWeight: 600, cursor: isLoading ? "not-allowed" : "pointer", fontFamily: "'DM Sans',sans-serif", opacity: isLoading ? 0.6 : 1 }}>
             <span className={isLoading ? "spinning" : ""} style={{ display: "inline-block", fontSize: 14 }}>↻</span>
             {isLoading ? "Fetching…" : "Refresh"}
