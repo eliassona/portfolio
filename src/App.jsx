@@ -54,6 +54,195 @@ function MetricCard({ label, value, sub, accent, loading }) {
   );
 }
 
+
+// ── Chart modal (standalone component — avoids re-render flicker from parent) ──
+function ChartModal({ holding, onClose, usdSekRate, prices }) {
+  const [tf, setTf]               = useState(holding.type === "forex" ? "1W" : "1M");
+  const [chartData, setChartData] = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const cache   = useRef({});
+  const rateRef = useRef(usdSekRate);
+  useEffect(() => { rateRef.current = usdSekRate; }, [usdSekRate]);
+
+  const sym      = holding.priceSymbol ?? holding.symbol;
+  const type     = holding.type;
+  const priceKey = getPriceKey(holding);
+
+  const timeframes = type === "forex"
+    ? ["1W","1M","YTD","1Y"]
+    : type === "crypto"
+      ? ["1D","1W","1M","YTD","1Y"]
+      : ["1D","1W","1M","YTD","1Y","5Y"];
+
+  // stable: priceKey is derived from symbol+type, never changes for a given holding
+  const fetchChartData = useCallback(async (timeframe) => {
+    const cacheKey = `${priceKey}-${timeframe}`;
+    if (cache.current[cacheKey]) { setChartData(cache.current[cacheKey]); return; }
+    setLoading(true); setError(null); setChartData(null);
+    try {
+      const now  = new Date();
+      const toTs = Math.floor(now.getTime() / 1000);
+      let data   = null;
+
+      if (type === "stock") {
+        // Use daily resolution for all timeframes — avoids "no_data" from intraday on free tier
+        let fromTs, resolution;
+        if      (timeframe === "1D")  { fromTs = toTs - 7*86400;        resolution = "D"; }
+        else if (timeframe === "1W")  { fromTs = toTs - 14*86400;       resolution = "D"; }
+        else if (timeframe === "1M")  { fromTs = toTs - 35*86400;       resolution = "D"; }
+        else if (timeframe === "YTD") { fromTs = Math.floor(new Date(now.getFullYear(),0,1)/1000); resolution = "D"; }
+        else if (timeframe === "1Y")  { fromTs = toTs - 370*86400;      resolution = "W"; }
+        else                          { fromTs = toTs - 5*370*86400;    resolution = "W"; }
+        const res  = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${sym}&resolution=${resolution}&from=${fromTs}&to=${toTs}&token=${FINNHUB_KEY}`);
+        const json = await res.json();
+        if (json.s === "ok" && json.c?.length) {
+          data = json.t.map((t, i) => ({ t: t * 1000, v: json.c[i] * rateRef.current }));
+        }
+      } else if (type === "crypto") {
+        const id = COINGECKO_IDS[sym];
+        if (!id) throw new Error("Unknown coin");
+        let days;
+        if      (timeframe === "1D")  days = 1;
+        else if (timeframe === "1W")  days = 7;
+        else if (timeframe === "1M")  days = 30;
+        else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
+        else                          days = 365;
+        const res  = await fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=sek&days=${days}`);
+        const json = await res.json();
+        if (json.prices?.length) data = json.prices.map(([t, v]) => ({ t, v }));
+      } else if (type === "forex") {
+        let startDate;
+        if      (timeframe === "1W")  startDate = new Date(now - 7*86400000);
+        else if (timeframe === "1M")  startDate = new Date(now - 30*86400000);
+        else if (timeframe === "YTD") startDate = new Date(now.getFullYear(), 0, 1);
+        else                          startDate = new Date(now - 365*86400000);
+        const from = startDate.toISOString().slice(0,10);
+        const to   = now.toISOString().slice(0,10);
+        const res  = await fetch(`https://api.frankfurter.app/${from}..${to}?from=${sym}&to=SEK`);
+        const json = await res.json();
+        if (json.rates) {
+          data = Object.entries(json.rates)
+            .sort(([a],[b]) => a.localeCompare(b))
+            .map(([date, r]) => ({ t: new Date(date).getTime(), v: r.SEK ?? null }))
+            .filter(d => d.v != null);
+        }
+      }
+
+      if (!data || data.length < 2) throw new Error("No data — market may be closed or data unavailable for this period");
+      cache.current[cacheKey] = data;
+      setChartData(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [priceKey, type, sym]); // eslint-disable-line
+
+  useEffect(() => { fetchChartData(tf); }, [tf]); // eslint-disable-line
+
+  useEffect(() => {
+    const handler = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const label = getDisplaySymbol(holding);
+  const p     = prices[priceKey];
+  const isPos = (p?.change ?? 0) >= 0;
+  const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+  const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+
+  const renderChart = () => {
+    if (loading) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)", borderTop: "2px solid #22d3a5", animation: "spin 0.8s linear infinite", WebkitAnimation: "spin 0.8s linear infinite" }} />
+      </div>
+    );
+    if (error) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 12, textAlign: "center", padding: "0 16px" }}>
+        {error}
+      </div>
+    );
+    if (!chartData) return null;
+
+    const W = 520, H = 200, PAD = { t: 10, r: 10, b: 28, l: 62 };
+    const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
+    const vals = chartData.map(d => d.v);
+    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const range = maxV - minV || 1;
+    const xi = i => PAD.l + (i / (chartData.length - 1)) * cW;
+    const yi = v => PAD.t + cH - ((v - minV) / range) * cH;
+    const pts     = chartData.map((d, i) => `${xi(i)},${yi(d.v)}`).join(" ");
+    const fillPts = `${xi(0)},${PAD.t+cH} ${pts} ${xi(chartData.length-1)},${PAD.t+cH}`;
+    const color   = chartData[chartData.length-1].v >= chartData[0].v ? "#22d3a5" : "#f87171";
+    const yTicks  = [0, 0.33, 0.67, 1].map(pct => ({ v: minV + pct*range, y: PAD.t+cH - pct*cH }));
+    const xIdxs   = [0, Math.floor(chartData.length/3), Math.floor(2*chartData.length/3), chartData.length-1];
+    const fmtDate = ts => {
+      const d = new Date(ts);
+      return d.toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
+    };
+    const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
+
+    return (
+      <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, color: "#4b5563" }}>{fmtDate(chartData[0].t)} — {fmtDate(chartData[chartData.length-1].t)}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 13, fontWeight: 700, color }}>{changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%</span>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+          <defs>
+            <linearGradient id="chartFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.18" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {yTicks.map((t, i) => <line key={i} x1={PAD.l} x2={W-PAD.r} y1={t.y} y2={t.y} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />)}
+          <polygon points={fillPts} fill="url(#chartFill)" />
+          <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+          {yTicks.map((t, i) => (
+            <text key={i} x={PAD.l-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#4b5563">
+              {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: t.v >= 1000 ? 0 : 2 }).format(t.v)}
+            </text>
+          ))}
+          {xIdxs.map(i => (
+            <text key={i} x={xi(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#4b5563">{fmtDate(chartData[i].t)}</text>
+          ))}
+        </svg>
+      </>
+    );
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto", WebkitOverflowScrolling: "touch" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, fontSize: 14, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${holding.color}22`, color: holding.color }}>{label[0]}</div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 16 }}>{label}</div>
+              <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{holding.name}</div>
+            </div>
+          </div>
+          <div style={{ textAlign: "right" }}>
+            <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, fontWeight: 700 }}>{fmtSEKFull(p?.priceSEK)}</div>
+            {p?.change != null && <div style={{ fontSize: 12, color: isPos ? "#22d3a5" : "#f87171", marginTop: 2 }}>{fmtPct(p.change)} today</div>}
+            <button onClick={onClose} style={{ marginTop: 6, background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          {timeframes.map(t => (
+            <button key={t} onClick={() => setTf(t)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer", background: tf === t ? "#22d3a5" : "rgba(255,255,255,0.06)", color: tf === t ? "#080c14" : "#6b7280", fontFamily: "'DM Sans',sans-serif", WebkitTapHighlightColor: "transparent" }}>
+              {t}
+            </button>
+          ))}
+        </div>
+        {renderChart()}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const holdings = holdingsData.map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
@@ -64,6 +253,7 @@ export default function App() {
   const [lastFetched, setLastFetched] = useState(null);
   const [animated, setAnimated]       = useState(false);
   const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
+  const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
@@ -417,7 +607,7 @@ export default function App() {
             const gainPct = gain != null && h.purchasePriceSEK ? (gain / h.purchasePriceSEK) * 100 : null;
             const isPos   = (gain ?? 0) >= 0;
             return (
-              <tr key={h.id} className="row-hover" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s" }}>
+              <tr key={h.id} className="row-hover" onClick={() => setSelectedHolding(h)} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s", cursor: "pointer" }}>
                 <td style={{ padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, flexShrink: 0 }}>🏠</div>
@@ -468,7 +658,7 @@ export default function App() {
           {rows.map(h => {
             const monthlyCost = h.balanceSEK != null && h.interestRate != null ? (h.balanceSEK * (h.interestRate / 100)) / 12 : null;
             return (
-              <tr key={h.id} className="row-hover" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s" }}>
+              <tr key={h.id} className="row-hover" onClick={() => setSelectedHolding(h)} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s", cursor: "pointer" }}>
                 <td style={{ padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(248,113,113,0.1)", flexShrink: 0 }}>💳</div>
@@ -492,6 +682,7 @@ export default function App() {
     </div>
   );
 
+
   // ── Holdings table ─────────────────────────────────────────────────────────
   const HoldingsTable = ({ rows, title, sourceLabel }) => (
     <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
@@ -513,7 +704,7 @@ export default function App() {
             const isGainPos = (h.gainPct ?? 0) >= 0;
             const label     = getDisplaySymbol(h);
             return (
-              <tr key={h.id} className="row-hover" style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s" }}>
+              <tr key={h.id} className="row-hover" onClick={() => setSelectedHolding(h)} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s", cursor: "pointer" }}>
                 <td style={{ padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 11, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, color: h.color, flexShrink: 0 }}>{label[0]}</div>
@@ -565,6 +756,7 @@ export default function App() {
   );
 
   return (
+    <>
     <div className="app-root" style={{ fontFamily: "'DM Sans','Helvetica Neue',sans-serif", color: "#e2e8f0", background: "#080c14" }}>
       <style>{`
         @import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@300;400;500;600;700&family=DM+Mono:wght@400;500&display=swap');
@@ -840,5 +1032,11 @@ export default function App() {
         </div>
       </div>
     </div>
+
+      {/* Chart modal */}
+      {selectedHolding && (
+        <ChartModal holding={selectedHolding} onClose={() => setSelectedHolding(null)} usdSekRate={usdSekRate} prices={prices} />
+      )}
+    </>
   );
 }
