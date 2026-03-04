@@ -232,7 +232,8 @@ export default function App() {
       const uniqueCryptoKeys = [...new Set(cryptoHoldings.map(getPriceKey))];
       const uniqueForexKeys  = [...new Set(forexHoldings.map(getPriceKey))];
 
-      const uniqueForexSymbols = [...new Set(forexHoldings.map(h => h.priceSymbol ?? h.symbol))];
+      // Always fetch USD, EUR, JPY for the exchange rate strip, plus any held currencies
+      const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY"])];
 
       const [usdSek, forexResults] = await Promise.all([
         fetchUsdSek(),
@@ -270,6 +271,18 @@ export default function App() {
       for (const key of uniqueForexKeys) {
         const sym = key.replace(/^forex:/, "");
         results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
+      }
+      // Always store USD, EUR, JPY rates so the exchange rate strip always shows
+      for (const sym of ["USD", "EUR", "JPY"]) {
+        const key = `forex:${sym}`;
+        if (!results[key]) {
+          results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
+        }
+      }
+      // Always store USD/EUR/JPY so the rate strip works even without forex holdings
+      for (const sym of ["USD", "EUR", "JPY"]) {
+        const key = `forex:${sym}`;
+        if (!results[key] && forexResults[sym]) results[key] = forexResults[sym];
       }
 
       setPrices(results);
@@ -707,34 +720,35 @@ export default function App() {
               )}
             </div>
 
-            {/* Currency breakdown */}
-            {forexRows.length > 0 && (
-              <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
-                  <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
-                </div>
-                {/* Exchange rate strip */}
-                {(() => {
-                  const usdSek = prices["forex:USD"]?.priceSEK;
-                  const eurSek = prices["forex:EUR"]?.priceSEK;
-                  const jpySek = prices["forex:JPY"]?.priceSEK;
-                  const rates = [
-                    { label: "USD/SEK", value: usdSek != null ? usdSek.toFixed(2)     : "—" },
-                    { label: "EUR/SEK", value: eurSek != null ? eurSek.toFixed(2)     : "—" },
-                    { label: "SEK/JPY", value: jpySek != null ? (1/jpySek).toFixed(4) : "—" },
-                  ];
-                  return (
-                    <div style={{ display: "flex", gap: 6, marginBottom: 14 }}>
-                      {rates.map(r => (
-                        <div key={r.label} style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "6px 8px", textAlign: "center" }}>
-                          <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.08em", marginBottom: 3 }}>{r.label}</div>
-                          <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "\'DM Mono\',monospace", color: "#d1d5db" }}>{r.value}</div>
-                        </div>
-                      ))}
-                    </div>
-                  );
-                })()}
+            {/* Currency breakdown — rates always shown, holdings only if present */}
+            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+                <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
+                {forexRows.length > 0 && <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>}
+              </div>
+              {/* Exchange rate strip — always visible */}
+              {(() => {
+                const usdSek = prices["forex:USD"]?.priceSEK;
+                const eurSek = prices["forex:EUR"]?.priceSEK;
+                const jpySek = prices["forex:JPY"]?.priceSEK;
+                const rates = [
+                  { label: "USD/SEK", value: usdSek != null ? usdSek.toFixed(2)     : "—" },
+                  { label: "EUR/SEK", value: eurSek != null ? eurSek.toFixed(2)     : "—" },
+                  { label: "SEK/JPY", value: jpySek != null ? (1/jpySek).toFixed(4) : "—" },
+                ];
+                return (
+                  <div style={{ display: "flex", gap: 6, marginBottom: forexRows.length > 0 ? 14 : 0 }}>
+                    {rates.map(r => (
+                      <div key={r.label} style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "6px 8px", textAlign: "center" }}>
+                        <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.08em", marginBottom: 3 }}>{r.label}</div>
+                        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading ? "#4b5563" : "#d1d5db" }}>{r.value}</div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+              {/* Holdings breakdown — only if forex positions exist */}
+              {forexRows.length > 0 && (
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                   {Object.values(
                     forexRows.reduce((acc, h) => {
@@ -757,8 +771,8 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-              </div>
-            )}
+              )}
+            </div>
 
             {/* Upcoming dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
