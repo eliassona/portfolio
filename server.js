@@ -2,6 +2,7 @@ import express from 'express';
 import nodemailer from 'nodemailer';
 import cors from 'cors';
 import { readFileSync } from 'fs';
+import https from 'https';
 
 const app  = express();
 const PORT = 3001;
@@ -80,6 +81,31 @@ app.post('/api/alert', async (req, res) => {
     console.error('Failed to send email:', err.message);
     res.status(500).json({ ok: false, error: err.message });
   }
+});
+
+
+// Yahoo Finance proxy — avoids CORS when called from the browser
+app.get('/api/yahoo/:symbol', (req, res) => {
+  const { symbol } = req.params;
+  const { range = '1mo', interval = '1d' } = req.query;
+  const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=false`;
+  const options = {
+    headers: {
+      'User-Agent': 'Mozilla/5.0',
+      'Accept': 'application/json',
+    }
+  };
+  https.get(url, options, (yahooRes) => {
+    let body = '';
+    yahooRes.on('data', chunk => { body += chunk; });
+    yahooRes.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(yahooRes.statusCode).send(body);
+    });
+  }).on('error', err => {
+    console.error('Yahoo proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  });
 });
 
 app.listen(PORT, () => {

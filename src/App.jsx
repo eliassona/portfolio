@@ -86,18 +86,24 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
       let data   = null;
 
       if (type === "stock") {
-        // Use daily resolution for all timeframes — avoids "no_data" from intraday on free tier
-        let fromTs, resolution;
-        if      (timeframe === "1D")  { fromTs = toTs - 7*86400;        resolution = "D"; }
-        else if (timeframe === "1W")  { fromTs = toTs - 14*86400;       resolution = "D"; }
-        else if (timeframe === "1M")  { fromTs = toTs - 35*86400;       resolution = "D"; }
-        else if (timeframe === "YTD") { fromTs = Math.floor(new Date(now.getFullYear(),0,1)/1000); resolution = "D"; }
-        else if (timeframe === "1Y")  { fromTs = toTs - 370*86400;      resolution = "W"; }
-        else                          { fromTs = toTs - 5*370*86400;    resolution = "W"; }
-        const res  = await fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${sym}&resolution=${resolution}&from=${fromTs}&to=${toTs}&token=${FINNHUB_KEY}`);
+        // Yahoo Finance — free, no key, reliable historical data
+        let range, interval;
+        if      (timeframe === "1D")  { range = "5d";  interval = "1d";  }
+        else if (timeframe === "1W")  { range = "1mo"; interval = "1d";  }
+        else if (timeframe === "1M")  { range = "3mo"; interval = "1d";  }
+        else if (timeframe === "YTD") { range = "ytd"; interval = "1d";  }
+        else if (timeframe === "1Y")  { range = "1y";  interval = "1wk"; }
+        else                          { range = "5y";  interval = "1wk"; }
+        const url  = `${ALERT_SERVER}/api/yahoo/${sym}?range=${range}&interval=${interval}`;
+        const res  = await fetch(url);
         const json = await res.json();
-        if (json.s === "ok" && json.c?.length) {
-          data = json.t.map((t, i) => ({ t: t * 1000, v: json.c[i] * rateRef.current }));
+        const result = json?.chart?.result?.[0];
+        const timestamps = result?.timestamp;
+        const closes     = result?.indicators?.quote?.[0]?.close;
+        if (timestamps?.length && closes?.length) {
+          data = timestamps
+            .map((t, i) => ({ t: t * 1000, v: closes[i] == null ? null : closes[i] * rateRef.current }))
+            .filter(d => d.v != null);
         }
       } else if (type === "crypto") {
         const id = COINGECKO_IDS[sym];
