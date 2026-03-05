@@ -27,6 +27,25 @@ function getPriceKey(h) {
   return `${h.type}:${h.priceSymbol ?? h.symbol}`;
 }
 
+// Category for allocation panel.
+// Use h.category to override, otherwise derive from type.
+const CATEGORY_COLORS = {
+  "Stocks":      "#6366f1",
+  "Crypto":      "#f59e0b",
+  "Real Estate": "#22d3a5",
+  "Cash":        "#38bdf8",
+  "Commodities": "#fb923c",
+  "Other":       "#a78bfa",
+};
+function getCategory(h) {
+  if (h.category) return h.category;
+  if (h.type === "crypto")      return "Crypto";
+  if (h.type === "forex")       return "Cash";
+  if (h.type === "realestate")  return "Real Estate";
+  if (h.type === "debt")        return null; // excluded from allocation
+  return "Stocks";
+}
+
 function Sparkline({ data, positive }) {
   if (!data || data.length < 2) return <div style={{ width: 80, height: 32 }} />;
   const w = 80, hh = 32;
@@ -250,7 +269,9 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
 }
 
 export default function App() {
-  const holdings = holdingsData.map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
+  const holdings = holdingsData
+    .filter(h => h.type !== "realestate" && h.type !== "debt")
+    .map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
   const [prices, setPrices]           = useState({});
   const [dividends, setDividends]     = useState([]);
@@ -260,6 +281,7 @@ export default function App() {
   const [animated, setAnimated]       = useState(false);
   const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
   const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
+  const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
@@ -575,21 +597,33 @@ export default function App() {
   const totalDebt       = debtRows.reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
   const netWorth        = totalValue + totalRealEstate - totalDebt;
 
-  // ── Allocation: group by displaySymbol and sum valueSEK ───────────────────
-  const allocationTotal = totalValue + totalRealEstate;
-  const allocationGroups = (() => {
-    const map = new Map();
+  // ── Allocation: grouped by category, with positions inside each ─────────────
+  // Use costSEK as fallback when live prices haven't loaded yet
+  const investedValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0);
+  const allocationTotal = investedValue + totalRealEstate;
+
+  const categoryGroups = (() => {
+    const cats = new Map();
+    const addToCategory = (cat, label, valueSEK, color) => {
+      if (!cat) return;
+      if (!cats.has(cat)) cats.set(cat, { label: cat, valueSEK: 0, color: CATEGORY_COLORS[cat] ?? "#a78bfa", positions: [] });
+      const g = cats.get(cat);
+      g.valueSEK += valueSEK;
+      // Merge positions with same label
+      const existing = g.positions.find(p => p.label === label);
+      if (existing) existing.valueSEK += valueSEK;
+      else g.positions.push({ label, valueSEK, color });
+    };
     for (const h of enriched) {
-      const key = getDisplaySymbol(h);
-      if (!map.has(key)) map.set(key, { label: key, valueSEK: 0, color: h.color });
-      map.get(key).valueSEK += h.valueSEK ?? h.costSEK;
+      const val = h.valueSEK ?? h.costSEK ?? 0;
+      if (val > 0) addToCategory(getCategory(h), getDisplaySymbol(h), val, h.color);
     }
     for (const h of realEstateRows) {
-      const key = h.name;
-      if (!map.has(key)) map.set(key, { label: key, valueSEK: 0, color: h.color });
-      map.get(key).valueSEK += h.valueSEK ?? 0;
+      addToCategory("Real Estate", h.name, h.valueSEK ?? 0, h.color);
     }
-    return [...map.values()].sort((a, b) => b.valueSEK - a.valueSEK);
+    // Sort positions within each category by value
+    for (const g of cats.values()) g.positions.sort((a, b) => b.valueSEK - a.valueSEK);
+    return [...cats.values()].sort((a, b) => b.valueSEK - a.valueSEK);
   })();
 
   // ── Real estate table ─────────────────────────────────────────────────────
@@ -869,24 +903,49 @@ export default function App() {
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Allocation — grouped by display symbol */}
+            {/* Allocation — by category */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "120ms" }}>
               <h2 style={{ margin: "0 0 18px", fontSize: 13, fontWeight: 600 }}>Allocation</h2>
-              <div style={{ display: "flex", flexDirection: "column", gap: 11 }}>
-                {allocationGroups.map((g, i) => {
-                  const pct = allocationTotal > 0 ? (g.valueSEK / allocationTotal) * 100 : 0;
+              <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+                {categoryGroups.map((g, i) => {
+                  const pct      = allocationTotal > 0 ? (g.valueSEK / allocationTotal) * 100 : 0;
+                  const expanded = expandedCat === g.label;
                   return (
                     <div key={g.label}>
-                      <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 4 }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: "#d1d5db" }}>{g.label}</span>
+                      <div onClick={() => setExpandedCat(expanded ? null : g.label)}
+                        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 5, cursor: "pointer" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                          <div style={{ width: 8, height: 8, borderRadius: 2, background: g.color, flexShrink: 0 }} />
+                          <span style={{ fontSize: 12, fontWeight: 700, color: "#e2e8f0" }}>{g.label}</span>
+                          <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 2 }}>{expanded ? "▲" : "▼"}</span>
+                        </div>
                         <div style={{ textAlign: "right" }}>
-                          <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#6b7280" }}>{pct.toFixed(1)}%</span>
-                          <span style={{ fontSize: 10, color: "#374151", marginLeft: 6 }}>{fmtSEK(g.valueSEK)}</span>
+                          <span style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: g.color }}>{pct.toFixed(1)}%</span>
+                          <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 8 }}>{fmtSEK(g.valueSEK)}</span>
                         </div>
                       </div>
-                      <div style={{ height: 5, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden" }}>
-                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: g.color, borderRadius: 4, transition: `width 0.9s cubic-bezier(0.4,0,0.2,1) ${i * 60}ms` }} />
+                      <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden", marginBottom: expanded ? 10 : 0 }}>
+                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: g.color, borderRadius: 4, transition: `width 0.9s cubic-bezier(0.4,0,0.2,1) ${i * 80}ms` }} />
                       </div>
+                      {expanded && (
+                        <div style={{ display: "flex", flexDirection: "column", gap: 5, paddingLeft: 14, borderLeft: `2px solid ${g.color}33` }}>
+                          {g.positions.map(p => {
+                            const posPct = allocationTotal > 0 ? (p.valueSEK / allocationTotal) * 100 : 0;
+                            return (
+                              <div key={p.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                                <div style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                                  <div style={{ width: 5, height: 5, borderRadius: "50%", background: p.color, flexShrink: 0 }} />
+                                  <span style={{ fontSize: 11, color: "#9ca3af" }}>{p.label}</span>
+                                </div>
+                                <div style={{ textAlign: "right" }}>
+                                  <span style={{ fontSize: 10, fontFamily: "'DM Mono',monospace", color: "#6b7280" }}>{posPct.toFixed(1)}%</span>
+                                  <span style={{ fontSize: 10, color: "#374151", marginLeft: 6 }}>{fmtSEK(p.valueSEK)}</span>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
