@@ -7,6 +7,20 @@ const ALERT_SERVER     = "http://localhost:3001";
 const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
 const COLORS = ["#22d3a5", "#6366f1", "#f59e0b", "#ec4899", "#38bdf8", "#a78bfa", "#fb923c", "#34d399"];
 
+// Market indexes & commodities — fetched via Finnhub quote endpoint
+const INDEXES = [
+  { symbol: "^DJI",    name: "Dow Jones",      group: "US" },
+  { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
+  { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
+  { symbol: "^OMX",    name: "OMX Stockholm",  group: "Nordic" },
+  { symbol: "^OMXC25", name: "OMX Copenhagen", group: "Nordic" },
+  { symbol: "^FTSE",   name: "FTSE 100",       group: "Europe" },
+  { symbol: "^GDAXI",  name: "DAX",            group: "Europe" },
+  { symbol: "GC=F",    name: "Gold",           group: "Commodities" },
+  { symbol: "CL=F",    name: "Oil (WTI)",      group: "Commodities" },
+  { symbol: "SI=F",    name: "Silver",         group: "Commodities" },
+];
+
 // CoinGecko ID map — add coins here as needed
 const COINGECKO_IDS = {
   BTC: "bitcoin", ETH: "ethereum", SOL: "solana",
@@ -281,6 +295,7 @@ export default function App() {
   const [animated, setAnimated]       = useState(false);
   const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
   const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
+  const [indexes, setIndexes]                 = useState([]);
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
@@ -505,6 +520,26 @@ export default function App() {
 
       setPrices(results);
 
+      // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
+      const indexResults = await Promise.all(
+        INDEXES.map(async idx => {
+          try {
+            const res  = await fetch(`${ALERT_SERVER}/api/yahoo/${encodeURIComponent(idx.symbol)}?range=5d&interval=1d`);
+            const json = await res.json();
+            const result = json?.chart?.result?.[0];
+            const closes = result?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+            const prev   = closes.length >= 2 ? closes[closes.length - 2] : null;
+            const last   = closes.length >= 1 ? closes[closes.length - 1] : null;
+            const change = last != null && prev != null && prev !== 0 ? ((last - prev) / prev) * 100 : null;
+            const currency = result?.meta?.currency ?? "USD";
+            return { ...idx, value: last, change, currency };
+          } catch {
+            return { ...idx, value: null, change: null, currency: "USD" };
+          }
+        })
+      );
+      setIndexes(indexResults);
+
       // Check for large movers and send email alert for any not already alerted today
       const alertCandidates = Object.entries(results)
         .filter(([key, p]) => {
@@ -723,6 +758,62 @@ export default function App() {
   );
 
 
+  // ── Indexes table ─────────────────────────────────────────────────────────
+  const IndexesTable = () => {
+    // Group by group field
+    const groups = INDEXES.reduce((acc, idx) => {
+      if (!acc[idx.group]) acc[idx.group] = [];
+      acc[idx.group].push(indexes.find(r => r.symbol === idx.symbol) ?? { ...idx, value: null, change: null });
+      return acc;
+    }, {});
+
+    return (
+      <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
+        <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Markets</h2>
+          <span style={{ fontSize: 10, color: "#374151", letterSpacing: "0.06em" }}>via Yahoo Finance</span>
+        </div>
+        <div style={{ padding: "4px 0 8px" }}>
+          {Object.entries(groups).map(([group, items]) => (
+            <div key={group}>
+              <div style={{ padding: "8px 24px 4px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151" }}>{group}</div>
+              {items.map(idx => {
+                const isPos = (idx.change ?? 0) >= 0;
+                const needsSEK = idx.currency === "USD" || idx.currency == null;
+                const displayVal = idx.value != null
+                  ? (needsSEK
+                      ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value)
+                      : new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value))
+                  : "—";
+                return (
+                  <div key={idx.symbol} className="row-hover" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s" }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{idx.name}</div>
+                      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{idx.symbol}</div>
+                    </div>
+                    <div style={{ textAlign: "right" }}>
+                      {isLoading && idx.value == null
+                        ? <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />
+                        : <>
+                            <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace" }}>{displayVal}</div>
+                            {idx.change != null && (
+                              <div style={{ fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
+                                {isPos ? "+" : ""}{idx.change.toFixed(2)}%
+                              </div>
+                            )}
+                          </>
+                      }
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </div>
+      </div>
+    );
+  };
+
   // ── Holdings table ─────────────────────────────────────────────────────────
   const HoldingsTable = ({ rows, title, sourceLabel }) => (
     <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
@@ -900,6 +991,7 @@ export default function App() {
             {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
+            <IndexesTable />
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
