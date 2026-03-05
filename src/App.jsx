@@ -585,11 +585,23 @@ export default function App() {
 
   useEffect(() => { fetchAll(); }, []); // eslint-disable-line
 
-  // Auto-refresh every 5 minutes — placed after fetchAll is defined
+  // Auto-refresh every 5 minutes — placed after fetchAll is defined.
+  // Also refreshes immediately on visibility change if the tab was hidden
+  // long enough that a refresh was due (browsers throttle timers in bg tabs).
   useEffect(() => {
     const id = setInterval(fetchAll, REFRESH_MS);
-    return () => clearInterval(id);
-  }, [fetchAll]);
+    const onVisible = () => {
+      if (document.visibilityState === "visible") {
+        const secsSinceFetch = lastFetched ? (Date.now() - lastFetched.getTime()) / 1000 : Infinity;
+        if (secsSinceFetch >= REFRESH_MS / 1000) fetchAll();
+      }
+    };
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      clearInterval(id);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
+  }, [fetchAll, lastFetched]);
 
   const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
