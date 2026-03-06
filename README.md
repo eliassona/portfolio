@@ -1,11 +1,12 @@
 # Portfolio Dashboard
 
-Live stocks, crypto & currency tracker in SEK, with email alerts and auto-refresh.
+Live stocks, crypto & currency tracker with email alerts, auto-refresh, and historical charts. All values displayed in your configured currency.
 
 ## APIs (all free, no auth)
-- **Stocks** → Finnhub
-- **Crypto** → CoinGecko (returns SEK directly, includes 30-day history)
+- **Stocks** → Finnhub (quotes) + Yahoo Finance (historical charts)
+- **Crypto** → CoinGecko
 - **Forex**  → Frankfurter (ECB rates)
+- **Indexes & Commodities** → Yahoo Finance
 
 ## Setup
 
@@ -14,7 +15,7 @@ Live stocks, crypto & currency tracker in SEK, with email alerts and auto-refres
 npm install
 ```
 
-### 2. Configure email alerts — edit config.json
+### 2. Configure — edit config.json
 ```json
 {
   "email": {
@@ -30,6 +31,9 @@ npm install
   },
   "alerts": {
     "changeThresholdPct": 5
+  },
+  "display": {
+    "currency": "SEK"
   }
 }
 ```
@@ -48,15 +52,40 @@ npm run server  # alert server only
 ```
 
 - Local:   http://localhost:5173
-- Network: http://192.168.x.x:5173
+- Network: http://192.168.x.x:5173 (use the Pi's hostname or IP)
+
+## Display currency
+Set `display.currency` in `config.json` to show all values in any currency. Restart the server after changing.
+
+| Value | Description |
+|-------|-------------|
+| `"SEK"` | Swedish krona (default) |
+| `"USD"` | US dollar |
+| `"EUR"` | Euro |
+| `"JPY"` | Japanese yen |
+| `"BTC"` | Bitcoin — small values shown in satoshis, larger in ₿ |
+| `"GBP"`, `"NOK"`, `"DKK"` etc. | Any currency supported by Frankfurter |
+
+When a non-SEK currency is active, a badge appears in the header showing which currency is in use. Conversion uses live exchange rates already fetched from Frankfurter and CoinGecko — no extra API calls.
 
 ## Auto-refresh
-The dashboard refreshes every 5 minutes automatically. A countdown timer in the header shows when the next refresh is due.
+The dashboard refreshes every 5 minutes automatically. A countdown timer in the header shows when the next refresh is due. When you return to a tab that was in the background, it refreshes immediately if a refresh was overdue.
 
 ## Email alerts
-An email is sent when any asset changes more than `changeThresholdPct`% in a day.
-Each asset only triggers one alert per day (resets at midnight).
-Alerts are silently skipped if the alert server isn't running.
+An email is sent when any asset changes more than `changeThresholdPct`% in a day. Each asset only triggers one alert per day (resets at midnight). Alerts are silently skipped if the alert server isn't running.
+
+## Historical charts
+Click any row in the Stocks, Crypto, or Currencies tables to open a chart. Click any row in the Exchange Rates panel for a rate chart. Timeframes: 1W, 1M, YTD, 1Y (plus 1D and 5Y for stocks). Data is cached per session so switching timeframes is instant after the first load.
+
+## Allocation panel
+Assets are grouped into categories. Click a category to expand and see individual positions. Override the default category for any holding by adding `"category"` to its entry in `holdings.json`:
+
+```json
+{ "symbol": "MSTR", "category": "Crypto", ... }
+{ "symbol": "GLD",  "category": "Commodities", ... }
+```
+
+Default category mapping: `stock` → Stocks, `crypto` → Crypto, `forex` → Cash, `realestate` → Real Estate.
 
 ## holdings.json fields
 
@@ -71,7 +100,8 @@ Alerts are silently skipped if the alert server isn't running.
 | `account`           | —        | Account label (e.g. "ISK", "Coinbase") |
 | `priceSymbol`       | —        | Override fetch symbol (e.g. BTC ETF → `"BTC"`) |
 | `displaySymbol`     | —        | Override symbol shown in UI |
-| `dividendPerShare`  | —        | Manual dividend amount in USD (for stocks Finnhub doesn't cover) |
+| `category`          | —        | Override allocation category (Stocks, Crypto, Cash, Real Estate, Commodities, Other) |
+| `dividendPerShare`  | —        | Manual dividend amount in USD (for stocks Finnhub doesn't cover yet) |
 | `dividendFrequency` | —        | `"monthly"` or `"quarterly"` |
 
 ### Real estate
@@ -85,3 +115,21 @@ Alerts are silently skipped if the alert server isn't running.
 { "type": "debt", "name": "Bolån", "lender": "Swedbank",
   "balanceSEK": 1900000, "interestRate": 3.45, "notes": "Rörlig ränta" }
 ```
+
+## Running on Raspberry Pi
+Install Node.js 20 via NodeSource:
+```bash
+curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
+sudo apt install -y nodejs
+```
+
+To keep the dashboard running after closing SSH, use PM2:
+```bash
+sudo npm install -g pm2
+pm2 start "npm run dev" --name portfolio-frontend
+pm2 start server.js --name portfolio-server
+pm2 save
+pm2 startup   # follow the printed command to auto-start on boot
+```
+
+Access from other devices using the Pi's hostname or IP, e.g. `http://wayneserver1:5173`.
