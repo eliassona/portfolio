@@ -3,7 +3,7 @@ import holdingsData from "../holdings.json";
 
 const FINNHUB_KEY      = "cvt0nk1r01qhup0ti100cvt0nk1r01qhup0ti10g";
 const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
-const ALERT_SERVER     = "http://localhost:3001";
+const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:3001`;
 const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
 const COLORS = ["#22d3a5", "#6366f1", "#f59e0b", "#ec4899", "#38bdf8", "#a78bfa", "#fb923c", "#34d399"];
 
