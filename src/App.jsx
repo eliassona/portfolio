@@ -470,10 +470,14 @@ export default function App() {
   const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
   const [indexes, setIndexes]                 = useState([]);
   const [goldUsd, setGoldUsd]                 = useState(null);
+  const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
+
+  // Keep goldUsdRef in sync with goldUsd state
+  useEffect(() => { goldUsdRef.current = goldUsd; }, [goldUsd]);
 
   // Countdown ticker (no dependency on fetchAll)
   useEffect(() => {
@@ -697,12 +701,11 @@ export default function App() {
 
       // Fetch gold price directly so BTC/Gold always works
       try {
-        const gRes    = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=GC%3DF&range=5d&interval=1d`);
+        const gRes    = await fetch(ALERT_SERVER + "/api/yahoo?symbol=GC%3DF&range=5d&interval=1d");
         const gJson   = await gRes.json();
         const gCloses = gJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
-        console.log("GOLD fetch closes:", gCloses);
         if (gCloses.length > 0) setGoldUsd(gCloses[gCloses.length - 1]);
-      } catch (e) { console.error("GOLD fetch error:", e.message); }
+      } catch (e) { console.warn("Gold fetch failed:", e.message); }
 
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
       const indexResults = await Promise.all(
@@ -723,6 +726,11 @@ export default function App() {
         })
       );
       setIndexes(indexResults);
+      // Fallback: if dedicated gold fetch didn't set goldUsd, grab it from indexResults
+      if (!goldUsdRef.current) {
+        const goldFromIndex = indexResults.find(r => r.symbol === "GC=F")?.value;
+        if (goldFromIndex) { setGoldUsd(goldFromIndex); goldUsdRef.current = goldFromIndex; }
+      }
 
       // Check for large movers and send email alert for any not already alerted today
       const alertCandidates = Object.entries(results)
@@ -1362,8 +1370,8 @@ export default function App() {
                 const jpySek  = prices["forex:JPY"]?.priceSEK;
                 const btcSek  = prices["crypto:BTC"]?.priceSEK;
                 const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
-                const btcGold = btcUsd != null && goldUsd != null && goldUsd > 0 ? btcUsd / goldUsd : null;
-                console.log("RATES debug:", { btcSek, usdSek, btcUsd, goldUsd, btcGold });
+                const goldNow = goldUsd ?? goldUsdRef.current;
+                const btcGold = btcUsd != null && goldNow != null && goldNow > 0 ? btcUsd / goldNow : null;
                 const rateRows = [
                   { key: "usd-sek",  label: "USD / SEK",  value: usdSek  != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",  color: "#38bdf8" },
                   { key: "eur-sek",  label: "EUR / SEK",  value: eurSek  != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",  color: "#a78bfa" },
