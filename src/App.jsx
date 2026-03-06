@@ -471,6 +471,7 @@ export default function App() {
   const [indexes, setIndexes]                 = useState([]);
   const [goldUsd, setGoldUsd]                 = useState(null);
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
+  const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
 
@@ -768,6 +769,14 @@ export default function App() {
 
   useEffect(() => { fetchAll(); }, []); // eslint-disable-line
 
+  // Load display currency from config
+  useEffect(() => {
+    fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/config`)
+      .then(r => r.json())
+      .then(cfg => { if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase()); })
+      .catch(() => {}); // silently fall back to SEK
+  }, []);
+
   // Auto-refresh every 5 minutes — placed after fetchAll is defined.
   // Also refreshes immediately on visibility change if the tab was hidden
   // long enough that a refresh was due (browsers throttle timers in bg tabs).
@@ -786,8 +795,37 @@ export default function App() {
     };
   }, [fetchAll, lastFetched]);
 
-  const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
-  const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
+  // ── Display currency conversion ───────────────────────────────────────────
+  // All internal values are in SEK. Convert to displayCurrency for rendering.
+  const sekToDisplay = (() => {
+    if (displayCurrency === "SEK") return 1;
+    if (displayCurrency === "USD") return prices["forex:USD"]?.priceSEK ? 1 / prices["forex:USD"].priceSEK : null;
+    if (displayCurrency === "EUR") return prices["forex:EUR"]?.priceSEK ? 1 / prices["forex:EUR"].priceSEK : null;
+    if (displayCurrency === "JPY") return prices["forex:JPY"]?.priceSEK ? 1 / prices["forex:JPY"].priceSEK : null;
+    if (displayCurrency === "BTC") {
+      const btcSek = prices["crypto:BTC"]?.priceSEK;
+      return btcSek ? 1 / btcSek : null;
+    }
+    // Generic forex — try to find the rate
+    const fKey = `forex:${displayCurrency}`;
+    return prices[fKey]?.priceSEK ? 1 / prices[fKey].priceSEK : null;
+  })();
+
+  const convertSEK = n => (n == null || sekToDisplay == null) ? null : n * sekToDisplay;
+
+  const fmtDisplay = (n, decimals = 0) => {
+    const v = convertSEK(n);
+    if (v == null) return "—";
+    if (displayCurrency === "BTC") {
+      // Show in sats or BTC depending on size
+      if (Math.abs(v) < 0.001) return (v * 1e8).toFixed(0) + " sats";
+      return v.toFixed(6) + " ₿";
+    }
+    return new Intl.NumberFormat("sv-SE", { style: "currency", currency: displayCurrency, maximumFractionDigits: decimals }).format(v);
+  };
+
+  const fmtSEK     = n => fmtDisplay(n, 0);
+  const fmtSEKFull = n => fmtDisplay(n, 2);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 
   // ── Enrich each holding with live price data ───────────────────────────────
@@ -1157,6 +1195,7 @@ export default function App() {
           </div>
           <span className="header-title" style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-0.02em" }}>Portfolio</span>
           {fetchStatus === "done"    && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(34,211,165,0.12)",  color: "#22d3a5", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Live</span>}
+          {displayCurrency !== "SEK" && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(245,158,11,0.15)", color: "#f59e0b", padding: "2px 8px", borderRadius: 20 }}>{displayCurrency}</span>}
           {fetchStatus === "loading" && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(99,102,241,0.12)",  color: "#a5b4fc", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Fetching…</span>}
           {fetchStatus === "error"   && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(248,113,113,0.12)", color: "#f87171", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Error</span>}
         </div>
@@ -1393,7 +1432,7 @@ export default function App() {
             <div style={{ background: "rgba(34,211,165,0.05)", border: "1px solid rgba(34,211,165,0.15)", borderRadius: 12, padding: "12px 16px" }}>
               <p style={{ margin: 0, fontSize: 10, color: "#22d3a5", lineHeight: 1.8 }}>
                 ⚡ Stocks: Finnhub · Crypto: CoinGecko · Forex: Frankfurter<br/>
-                All values in SEK. Edit <strong>holdings.json</strong> to update positions.
+                All values in {displayCurrency}. Edit <strong>holdings.json</strong> to update positions.
               </p>
             </div>
           </div>
