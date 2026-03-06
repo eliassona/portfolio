@@ -697,11 +697,12 @@ export default function App() {
 
       // Fetch gold price directly so BTC/Gold always works
       try {
-        const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=GC%3DF&range=5d&interval=1d`);
-        const gJson = await gRes.json();
+        const gRes    = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=GC%3DF&range=5d&interval=1d`);
+        const gJson   = await gRes.json();
         const gCloses = gJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+        console.log("GOLD fetch closes:", gCloses);
         if (gCloses.length > 0) setGoldUsd(gCloses[gCloses.length - 1]);
-      } catch { /* gold fetch failed silently */ }
+      } catch (e) { console.error("GOLD fetch error:", e.message); }
 
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
       const indexResults = await Promise.all(
@@ -1362,6 +1363,7 @@ export default function App() {
                 const btcSek  = prices["crypto:BTC"]?.priceSEK;
                 const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
                 const btcGold = btcUsd != null && goldUsd != null && goldUsd > 0 ? btcUsd / goldUsd : null;
+                console.log("RATES debug:", { btcSek, usdSek, btcUsd, goldUsd, btcGold });
                 const rateRows = [
                   { key: "usd-sek",  label: "USD / SEK",  value: usdSek  != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",  color: "#38bdf8" },
                   { key: "eur-sek",  label: "EUR / SEK",  value: eurSek  != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",  color: "#a78bfa" },
