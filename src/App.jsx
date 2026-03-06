@@ -699,14 +699,6 @@ export default function App() {
 
       setPrices(results);
 
-      // Fetch gold price directly so BTC/Gold always works
-      try {
-        const gRes    = await fetch(ALERT_SERVER + "/api/yahoo?symbol=GC%3DF&range=5d&interval=1d");
-        const gJson   = await gRes.json();
-        const gCloses = gJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
-        if (gCloses.length > 0) setGoldUsd(gCloses[gCloses.length - 1]);
-      } catch (e) { console.warn("Gold fetch failed:", e.message); }
-
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
       const indexResults = await Promise.all(
         INDEXES.map(async idx => {
@@ -726,11 +718,10 @@ export default function App() {
         })
       );
       setIndexes(indexResults);
-      // Fallback: if dedicated gold fetch didn't set goldUsd, grab it from indexResults
-      if (!goldUsdRef.current) {
-        const goldFromIndex = indexResults.find(r => r.symbol === "GC=F")?.value;
-        if (goldFromIndex) { setGoldUsd(goldFromIndex); goldUsdRef.current = goldFromIndex; }
-      }
+      // Get gold price from indexResults — single source of truth
+      const goldFromIndex = indexResults.find(r => r.symbol === "GC=F")?.value ?? null;
+      setGoldUsd(goldFromIndex);
+      goldUsdRef.current = goldFromIndex;
 
       // Check for large movers and send email alert for any not already alerted today
       const alertCandidates = Object.entries(results)
