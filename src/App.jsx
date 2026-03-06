@@ -1081,35 +1081,47 @@ export default function App() {
               )}
             </div>
 
-            {/* Currency breakdown — rates always shown, holdings only if present */}
-            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
-              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-                <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
-                {forexRows.length > 0 && <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>}
-              </div>
-              {/* Exchange rate strip — always visible */}
+            {/* Exchange Rates pane */}
+            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "175ms" }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
               {(() => {
-                const usdSek = prices["forex:USD"]?.priceSEK;
-                const eurSek = prices["forex:EUR"]?.priceSEK;
-                const jpySek = prices["forex:JPY"]?.priceSEK;
+                const usdSek  = prices["forex:USD"]?.priceSEK;
+                const eurSek  = prices["forex:EUR"]?.priceSEK;
+                const jpySek  = prices["forex:JPY"]?.priceSEK;
+                // BTC price in USD via CoinGecko (stored as SEK, back-convert)
+                const btcSek  = prices["crypto:BTC"]?.priceSEK;
+                const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
+                // Gold price in USD from indexes state
+                const goldIdx = indexes.find(i => i.symbol === "GC=F");
+                const goldUsd = goldIdx?.value ?? null;
+                const btcGold = btcUsd != null && goldUsd != null && goldUsd > 0 ? btcUsd / goldUsd : null;
                 const rates = [
-                  { label: "USD/SEK", value: usdSek != null ? usdSek.toFixed(2)     : "—" },
-                  { label: "EUR/SEK", value: eurSek != null ? eurSek.toFixed(2)     : "—" },
-                  { label: "SEK/JPY", value: jpySek != null ? (1/jpySek).toFixed(4) : "—" },
+                  { label: "USD / SEK", value: usdSek != null ? usdSek.toFixed(2)      : "—" },
+                  { label: "EUR / SEK", value: eurSek != null ? eurSek.toFixed(2)      : "—" },
+                  { label: "SEK / JPY", value: jpySek != null ? (1/jpySek).toFixed(4)  : "—" },
+                  { label: "BTC / USD", value: btcUsd != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—" },
+                  { label: "BTC / GOLD", value: btcGold != null ? btcGold.toFixed(2) + " oz" : "—" },
                 ];
                 return (
-                  <div style={{ display: "flex", gap: 6, marginBottom: forexRows.length > 0 ? 14 : 0 }}>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                     {rates.map(r => (
-                      <div key={r.label} style={{ flex: 1, background: "rgba(255,255,255,0.04)", borderRadius: 8, padding: "6px 8px", textAlign: "center" }}>
-                        <div style={{ fontSize: 9, color: "#4b5563", letterSpacing: "0.08em", marginBottom: 3 }}>{r.label}</div>
-                        <div style={{ fontSize: 11, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading ? "#4b5563" : "#d1d5db" }}>{r.value}</div>
+                      <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8 }}>
+                        <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.04em" }}>{r.label}</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading && r.value === "—" ? "#374151" : "#d1d5db" }}>{r.value}</span>
                       </div>
                     ))}
                   </div>
                 );
               })()}
-              {/* Holdings breakdown — only if forex positions exist */}
-              {forexRows.length > 0 && (
+            </div>
+
+            {/* Currency holdings — only if forex positions exist */}
+            {forexRows.length > 0 && (
+              <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
+                  <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
+                </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                   {Object.values(
                     forexRows.reduce((acc, h) => {
@@ -1132,8 +1144,8 @@ export default function App() {
                     </div>
                   ))}
                 </div>
-              )}
-            </div>
+              </div>
+            )}
 
             {/* Upcoming dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
