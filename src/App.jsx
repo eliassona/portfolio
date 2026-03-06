@@ -127,7 +127,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else if (timeframe === "YTD") { range = "ytd"; interval = "1d";  }
         else if (timeframe === "1Y")  { range = "1y";  interval = "1wk"; }
         else                          { range = "5y";  interval = "1wk"; }
-        const url  = `${ALERT_SERVER}/api/yahoo/${sym}?range=${range}&interval=${interval}`;
+        const url  = `${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`;
         const res  = await fetch(url);
         const json = await res.json();
         const result = json?.chart?.result?.[0];
@@ -333,7 +333,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate }) {
             data = json.prices.map(([t, v]) => ({ t, v }));
           } else {
             // BTC/GOLD: need gold history too — use Yahoo proxy
-            const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo/GC%3DF?range=${days <= 7 ? "1mo" : days <= 30 ? "3mo" : days <= 100 ? "ytd" : "1y"}&interval=1d`);
+            const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=GC%3DF&range=${days <= 7 ? "1mo" : days <= 30 ? "3mo" : days <= 100 ? "ytd" : "1y"}&interval=1d`);
             const gJson = await gRes.json();
             const gResult = gJson?.chart?.result?.[0];
             const gTs     = gResult?.timestamp ?? [];
@@ -697,7 +697,7 @@ export default function App() {
 
       // Fetch gold price directly so BTC/Gold always works
       try {
-        const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo/GC%3DF?range=5d&interval=1d`);
+        const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=GC%3DF&range=5d&interval=1d`);
         const gJson = await gRes.json();
         const gCloses = gJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
         if (gCloses.length > 0) setGoldUsd(gCloses[gCloses.length - 1]);
@@ -707,7 +707,7 @@ export default function App() {
       const indexResults = await Promise.all(
         INDEXES.map(async idx => {
           try {
-            const res  = await fetch(`${ALERT_SERVER}/api/yahoo/${encodeURIComponent(idx.symbol)}?range=5d&interval=1d`);
+            const res  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(idx.symbol)}&range=5d&interval=1d`);
             const json = await res.json();
             const result = json?.chart?.result?.[0];
             const closes = result?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];

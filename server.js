@@ -85,9 +85,10 @@ app.post('/api/alert', async (req, res) => {
 
 
 // Yahoo Finance proxy — avoids CORS when called from the browser
-app.get('/api/yahoo/:symbol', (req, res) => {
-  const { symbol } = req.params;
-  const { range = '1mo', interval = '1d' } = req.query;
+// Symbol passed as query param (?symbol=GC=F) to avoid Express routing issues with special chars
+app.get('/api/yahoo', (req, res) => {
+  const { symbol, range = '1mo', interval = '1d' } = req.query;
+  if (!symbol) return res.status(400).json({ error: 'symbol required' });
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=false`;
   const options = {
     headers: {
