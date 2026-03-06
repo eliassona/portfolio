@@ -282,6 +282,179 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
   );
 }
 
+
+// ── Rate chart modal ──────────────────────────────────────────────────────────
+function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate }) {
+  const [tf, setTf]               = useState("1M");
+  const [chartData, setChartData] = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const cache = useRef({});
+  const timeframes = ["1W", "1M", "YTD", "1Y"];
+
+  const fetchData = useCallback(async (timeframe) => {
+    const cacheKey = `rate-${rate.chartId}-${timeframe}`;
+    if (cache.current[cacheKey]) { setChartData(cache.current[cacheKey]); return; }
+    setLoading(true); setError(null); setChartData(null);
+    try {
+      const now = new Date();
+      let data  = null;
+
+      if (rate.chartId === "USD_SEK" || rate.chartId === "EUR_SEK" || rate.chartId === "SEK_JPY") {
+        // Frankfurter historical forex
+        const fromSym = rate.chartId === "EUR_SEK" ? "EUR" : rate.chartId === "USD_SEK" ? "USD" : "SEK";
+        const toSym   = rate.chartId === "SEK_JPY" ? "JPY" : "SEK";
+        let startDate;
+        if      (timeframe === "1W")  startDate = new Date(now - 7*86400000);
+        else if (timeframe === "1M")  startDate = new Date(now - 30*86400000);
+        else if (timeframe === "YTD") startDate = new Date(now.getFullYear(), 0, 1);
+        else                          startDate = new Date(now - 365*86400000);
+        const from = startDate.toISOString().slice(0,10);
+        const to   = now.toISOString().slice(0,10);
+        const res  = await fetch(`https://api.frankfurter.app/${from}..${to}?from=${fromSym}&to=${toSym}`);
+        const json = await res.json();
+        if (json.rates) {
+          data = Object.entries(json.rates)
+            .sort(([a],[b]) => a.localeCompare(b))
+            .map(([date, r]) => ({ t: new Date(date).getTime(), v: r[toSym] ?? null }))
+            .filter(d => d.v != null);
+        }
+      } else if (rate.chartId === "BTC_USD" || rate.chartId === "BTC_GOLD") {
+        // CoinGecko BTC in USD
+        let days;
+        if      (timeframe === "1W")  days = 7;
+        else if (timeframe === "1M")  days = 30;
+        else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
+        else                          days = 365;
+        const res  = await fetch(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=usd&days=${days}`);
+        const json = await res.json();
+        if (json.prices?.length) {
+          if (rate.chartId === "BTC_USD") {
+            data = json.prices.map(([t, v]) => ({ t, v }));
+          } else {
+            // BTC/GOLD: need gold history too — use Yahoo proxy
+            const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo/GC%3DF?range=${days <= 7 ? "1mo" : days <= 30 ? "3mo" : days <= 100 ? "ytd" : "1y"}&interval=1d`);
+            const gJson = await gRes.json();
+            const gResult = gJson?.chart?.result?.[0];
+            const gTs     = gResult?.timestamp ?? [];
+            const gClose  = gResult?.indicators?.quote?.[0]?.close ?? [];
+            // Build a date->goldPrice map
+            const goldMap = {};
+            gTs.forEach((t, i) => { if (gClose[i] != null) goldMap[new Date(t*1000).toISOString().slice(0,10)] = gClose[i]; });
+            // Match BTC daily prices to gold prices by date
+            data = json.prices
+              .map(([t, btcUsd]) => {
+                const dateStr = new Date(t).toISOString().slice(0,10);
+                const gPrice  = goldMap[dateStr];
+                return gPrice != null ? { t, v: btcUsd / gPrice } : null;
+              })
+              .filter(Boolean);
+          }
+        }
+      }
+
+      if (!data || data.length < 2) throw new Error("No data available");
+      cache.current[cacheKey] = data;
+      setChartData(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [rate.chartId]);
+
+  useEffect(() => { fetchData(tf); }, [tf]); // eslint-disable-line
+
+  useEffect(() => {
+    const handler = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const renderChart = () => {
+    if (loading) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)", borderTop: "2px solid #22d3a5", animation: "spin 0.8s linear infinite", WebkitAnimation: "spin 0.8s linear infinite" }} />
+      </div>
+    );
+    if (error) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 12, textAlign: "center", padding: "0 16px" }}>{error}</div>
+    );
+    if (!chartData) return null;
+
+    const W = 520, H = 200, PAD = { t: 10, r: 10, b: 28, l: 72 };
+    const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
+    const vals = chartData.map(d => d.v);
+    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const range = maxV - minV || 1;
+    const xi = i => PAD.l + (i / (chartData.length - 1)) * cW;
+    const yi = v => PAD.t + cH - ((v - minV) / range) * cH;
+    const pts     = chartData.map((d, i) => `${xi(i)},${yi(d.v)}`).join(" ");
+    const fillPts = `${xi(0)},${PAD.t+cH} ${pts} ${xi(chartData.length-1)},${PAD.t+cH}`;
+    const color   = chartData[chartData.length-1].v >= chartData[0].v ? "#22d3a5" : "#f87171";
+    const yTicks  = [0, 0.33, 0.67, 1].map(p => ({ v: minV + p*range, y: PAD.t+cH - p*cH }));
+    const xIdxs   = [0, Math.floor(chartData.length/3), Math.floor(2*chartData.length/3), chartData.length-1];
+    const fmtDate = ts => new Date(ts).toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
+    const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
+    const fmtY = v => {
+      if (rate.chartId === "BTC_USD") return new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(v);
+      if (rate.chartId === "BTC_GOLD") return v.toFixed(2);
+      return v.toFixed(rate.chartId === "SEK_JPY" ? 3 : 2);
+    };
+
+    return (
+      <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, color: "#4b5563" }}>{fmtDate(chartData[0].t)} — {fmtDate(chartData[chartData.length-1].t)}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 13, fontWeight: 700, color }}>{changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%</span>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+          <defs>
+            <linearGradient id="rateChartFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.18" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {yTicks.map((t, i) => <line key={i} x1={PAD.l} x2={W-PAD.r} y1={t.y} y2={t.y} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />)}
+          <polygon points={fillPts} fill="url(#rateChartFill)" />
+          <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+          {yTicks.map((t, i) => (
+            <text key={i} x={PAD.l-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#4b5563">{fmtY(t.v)}</text>
+          ))}
+          {xIdxs.map(i => (
+            <text key={i} x={xi(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#4b5563">{fmtDate(chartData[i].t)}</text>
+          ))}
+        </svg>
+      </>
+    );
+  };
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", background: `${rate.color}22`, fontSize: 16 }}>⇄</div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 18 }}>{rate.label}</div>
+              <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{rate.value}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          {timeframes.map(t => (
+            <button key={t} onClick={() => setTf(t)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer", background: tf === t ? "#22d3a5" : "rgba(255,255,255,0.06)", color: tf === t ? "#080c14" : "#6b7280", fontFamily: "'DM Sans',sans-serif" }}>
+              {t}
+            </button>
+          ))}
+        </div>
+        {renderChart()}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const holdings = holdingsData
     .filter(h => h.type !== "realestate" && h.type !== "debt")
@@ -296,7 +469,9 @@ export default function App() {
   const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
   const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
   const [indexes, setIndexes]                 = useState([]);
+  const [goldUsd, setGoldUsd]                 = useState(null);
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
+  const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
@@ -519,6 +694,14 @@ export default function App() {
       }
 
       setPrices(results);
+
+      // Fetch gold price directly so BTC/Gold always works
+      try {
+        const gRes  = await fetch(`${ALERT_SERVER}/api/yahoo/GC%3DF?range=5d&interval=1d`);
+        const gJson = await gRes.json();
+        const gCloses = gJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+        if (gCloses.length > 0) setGoldUsd(gCloses[gCloses.length - 1]);
+      } catch { /* gold fetch failed silently */ }
 
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
       const indexResults = await Promise.all(
@@ -1081,40 +1264,6 @@ export default function App() {
               )}
             </div>
 
-            {/* Exchange Rates pane */}
-            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "175ms" }}>
-              <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
-              {(() => {
-                const usdSek  = prices["forex:USD"]?.priceSEK;
-                const eurSek  = prices["forex:EUR"]?.priceSEK;
-                const jpySek  = prices["forex:JPY"]?.priceSEK;
-                // BTC price in USD via CoinGecko (stored as SEK, back-convert)
-                const btcSek  = prices["crypto:BTC"]?.priceSEK;
-                const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
-                // Gold price in USD from indexes state
-                const goldIdx = indexes.find(i => i.symbol === "GC=F");
-                const goldUsd = goldIdx?.value ?? null;
-                const btcGold = btcUsd != null && goldUsd != null && goldUsd > 0 ? btcUsd / goldUsd : null;
-                const rates = [
-                  { label: "USD / SEK", value: usdSek != null ? usdSek.toFixed(2)      : "—" },
-                  { label: "EUR / SEK", value: eurSek != null ? eurSek.toFixed(2)      : "—" },
-                  { label: "SEK / JPY", value: jpySek != null ? (1/jpySek).toFixed(4)  : "—" },
-                  { label: "BTC / USD", value: btcUsd != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—" },
-                  { label: "BTC / GOLD", value: btcGold != null ? btcGold.toFixed(2) + " oz" : "—" },
-                ];
-                return (
-                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {rates.map(r => (
-                      <div key={r.label} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "6px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8 }}>
-                        <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.04em" }}>{r.label}</span>
-                        <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading && r.value === "—" ? "#374151" : "#d1d5db" }}>{r.value}</span>
-                      </div>
-                    ))}
-                  </div>
-                );
-              })()}
-            </div>
-
             {/* Currency holdings — only if forex positions exist */}
             {forexRows.length > 0 && (
               <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
@@ -1203,6 +1352,43 @@ export default function App() {
               )}
             </div>
 
+            {/* Exchange Rates pane — below Upcoming Dividends */}
+            <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "210ms" }}>
+              <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
+              {(() => {
+                const usdSek  = prices["forex:USD"]?.priceSEK;
+                const eurSek  = prices["forex:EUR"]?.priceSEK;
+                const jpySek  = prices["forex:JPY"]?.priceSEK;
+                const btcSek  = prices["crypto:BTC"]?.priceSEK;
+                const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
+                const btcGold = btcUsd != null && goldUsd != null && goldUsd > 0 ? btcUsd / goldUsd : null;
+                const rateRows = [
+                  { key: "usd-sek",  label: "USD / SEK",  value: usdSek  != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",  color: "#38bdf8" },
+                  { key: "eur-sek",  label: "EUR / SEK",  value: eurSek  != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",  color: "#a78bfa" },
+                  { key: "sek-jpy",  label: "SEK / JPY",  value: jpySek  != null ? (1/jpySek).toFixed(4) : "—", chartId: "SEK_JPY",  color: "#f59e0b" },
+                  { key: "btc-usd",  label: "BTC / USD",  value: btcUsd  != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",  color: "#f59e0b" },
+                  { key: "btc-gold", label: "BTC / GOLD", value: btcGold != null ? btcGold.toFixed(2) + " oz" : "—", chartId: "BTC_GOLD", color: "#fb923c" },
+                ];
+                return (
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {rateRows.map(r => (
+                      <div key={r.key} onClick={() => setSelectedRate(r)} className="row-hover"
+                        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8, cursor: "pointer", transition: "background 0.15s" }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ width: 6, height: 6, borderRadius: "50%", background: r.color, flexShrink: 0 }} />
+                          <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.04em" }}>{r.label}</span>
+                        </div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading && r.value === "—" ? "#374151" : "#d1d5db" }}>{r.value}</span>
+                          <span style={{ fontSize: 10, color: "#374151" }}>↗</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                );
+              })()}
+            </div>
+
             <div style={{ background: "rgba(34,211,165,0.05)", border: "1px solid rgba(34,211,165,0.15)", borderRadius: 12, padding: "12px 16px" }}>
               <p style={{ margin: 0, fontSize: 10, color: "#22d3a5", lineHeight: 1.8 }}>
                 ⚡ Stocks: Finnhub · Crypto: CoinGecko · Forex: Frankfurter<br/>
@@ -1217,6 +1403,9 @@ export default function App() {
       {/* Chart modal */}
       {selectedHolding && (
         <ChartModal holding={selectedHolding} onClose={() => setSelectedHolding(null)} usdSekRate={usdSekRate} prices={prices} />
+      )}
+      {selectedRate && (
+        <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={prices} usdSekRate={usdSekRate} />
       )}
     </>
   );
