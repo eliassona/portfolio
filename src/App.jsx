@@ -496,20 +496,24 @@ export default function App() {
     return () => clearTimeout(id);
   }, []);
 
-  // ── Stock via Finnhub ──────────────────────────────────────────────────────
+  // ── Stock via Finnhub (quote) + Yahoo (30d history) ──────────────────────
   const fetchStock = async (symbol) => {
-    const now = Math.floor(Date.now() / 1000);
-    const from = now - 30 * 86400;
-    const [quoteRes, candleRes] = await Promise.all([
+    const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const [quoteRes, historyRes] = await Promise.all([
       fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`),
-      fetch(`https://finnhub.io/api/v1/stock/candle?symbol=${symbol}&resolution=D&from=${from}&to=${now}&token=${FINNHUB_KEY}`)
+      fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(symbol)}&range=1mo&interval=1d`),
     ]);
-    const quote  = await quoteRes.json();
-    const candle = await candleRes.json();
-    const priceUSD   = quote.c ?? null;
-    const prevUSD    = quote.pc ?? null;
-    const change     = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
-    const historyUSD = candle.s === "ok" ? candle.c : null;
+    const quote = await quoteRes.json();
+    const priceUSD = quote.c ?? null;
+    const prevUSD  = quote.pc ?? null;
+    const change   = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
+    let historyUSD = null;
+    try {
+      const hJson  = await historyRes.json();
+      const closes = hJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
+      const filtered = closes.filter(v => v != null);
+      if (filtered.length > 1) historyUSD = filtered;
+    } catch { /* history unavailable */ }
     return { priceUSD, change, historyUSD };
   };
 
@@ -535,13 +539,33 @@ export default function App() {
     if (!symbols.length) return {};
     const allSyms = [...new Set([...symbols, "SEK"])].join(",");
     try {
-      const res    = await fetch(`https://api.frankfurter.app/latest?to=${allSyms}`);
-      const latest = await res.json();
+      const now      = new Date();
+      const from     = new Date(now - 30 * 86400000).toISOString().slice(0, 10);
+      const to       = now.toISOString().slice(0, 10);
+      const [latestRes, historyRes] = await Promise.all([
+        fetch(`https://api.frankfurter.app/latest?to=${allSyms}`),
+        fetch(`https://api.frankfurter.app/${from}..${to}?from=EUR&to=SEK`),
+      ]);
+      const latest  = await latestRes.json();
+      const history = await historyRes.json();
+      // Build SEK history array from EUR→SEK daily rates
+      const sekHistory = history.rates
+        ? Object.entries(history.rates).sort(([a],[b]) => a.localeCompare(b)).map(([,r]) => r.SEK).filter(Boolean)
+        : null;
       const rates  = { ...(latest.rates ?? {}), EUR: 1 };
       const sekPerEur = rates["SEK"] ?? 1;
       return Object.fromEntries(symbols.map(sym => {
         const rateToEur = rates[sym] ?? null;
-        return [sym, { priceSEK: rateToEur != null ? sekPerEur / rateToEur : null, change: null, historySEK: null }];
+        // For non-SEK symbols, build history by dividing SEK/EUR history by their EUR rate
+        let historySEK = null;
+        if (sekHistory && rateToEur != null && rateToEur !== 0) {
+          if (sym === "USD" || sym === "SEK") {
+            historySEK = sekHistory.map(s => s / rateToEur);
+          } else {
+            historySEK = sekHistory.map(s => s / rateToEur);
+          }
+        }
+        return [sym, { priceSEK: rateToEur != null ? sekPerEur / rateToEur : null, change: null, historySEK }];
       }));
     } catch {
       return Object.fromEntries(symbols.map(s => [s, { priceSEK: null, change: null, historySEK: null }]));
@@ -1048,7 +1072,7 @@ export default function App() {
   };
 
   // ── Holdings table ─────────────────────────────────────────────────────────
-  const HoldingsTable = ({ rows, title, sourceLabel }) => (
+  const HoldingsTable = ({ rows, title, sourceLabel, showSparkline = true }) => (
     <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
       <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>{title}</h2>
@@ -1057,7 +1081,7 @@ export default function App() {
       <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", "30D"].map(col => (
+            {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", ...(showSparkline ? ["30D"] : [])].map(col => (
               <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
             ))}
           </tr>
@@ -1108,9 +1132,9 @@ export default function App() {
                       : <span style={{ fontSize: 11, color: "#374151" }}>—</span>
                   }
                 </td>
-                <td style={{ padding: "12px 14px" }}>
+                {showSparkline && <td style={{ padding: "12px 14px" }}>
                   {h.historySEK ? <Sparkline data={h.historySEK} positive={isPos} /> : <div style={{ width: 80 }} />}
-                </td>
+                </td>}
               </tr>
             );
           })}
@@ -1222,7 +1246,7 @@ export default function App() {
           <div className={`fade-in ${animated ? "visible" : ""}`} style={{ transitionDelay: "80ms" }}>
             {stockRows.length     > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
             {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
-            {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" />}
+            {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" showSparkline={false} />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
             <IndexesTable />
