@@ -284,7 +284,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
 
 
 // ── Rate chart modal ──────────────────────────────────────────────────────────
-function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate }) {
+function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK = 54 }) {
   const [tf, setTf]               = useState("1M");
   const [chartData, setChartData] = useState(null);
   const [loading, setLoading]     = useState(false);
@@ -353,6 +353,23 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate }) {
         }
       }
 
+      if (rate.chartId === "BIGMAC_SATS") {
+        // Derive from BTC/SEK history — sats = (bigMacSEK / btcPriceSEK) * 1e8
+        let days;
+        if      (timeframe === "1W")  days = 7;
+        else if (timeframe === "1M")  days = 30;
+        else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
+        else                          days = 365;
+        const res  = await fetch(`https://api.coingecko.com/api/v3/coins/bitcoin/market_chart?vs_currency=sek&days=${days}`);
+        const json = await res.json();
+        if (json.prices?.length) {
+          data = json.prices.map(([t, btcSek]) => ({
+            t,
+            v: btcSek > 0 ? Math.round((bigMacSEK / btcSek) * 1e8) : null,
+          })).filter(d => d.v != null);
+        }
+      }
+
       if (!data || data.length < 2) throw new Error("No data available");
       cache.current[cacheKey] = data;
       setChartData(data);
@@ -397,8 +414,9 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate }) {
     const fmtDate = ts => new Date(ts).toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
     const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
     const fmtY = v => {
-      if (rate.chartId === "BTC_USD") return new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(v);
-      if (rate.chartId === "BTC_GOLD") return v.toFixed(2);
+      if (rate.chartId === "BTC_USD")      return new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(v);
+      if (rate.chartId === "BTC_GOLD")     return v.toFixed(2);
+      if (rate.chartId === "BIGMAC_SATS")  return Math.round(v).toLocaleString("sv-SE") + " sats";
       return v.toFixed(rate.chartId === "SEK_JPY" ? 3 : 2);
     };
 
@@ -472,6 +490,7 @@ export default function App() {
   const [goldUsd, setGoldUsd]                 = useState(null);
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
+  const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
 
@@ -797,7 +816,10 @@ export default function App() {
   useEffect(() => {
     fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/config`)
       .then(r => r.json())
-      .then(cfg => { if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase()); })
+      .then(cfg => {
+        if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase());
+        if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
+      })
       .catch(() => {}); // silently fall back to SEK
   }, []);
 
@@ -1426,12 +1448,15 @@ export default function App() {
                 const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
                 const goldNow = goldUsd ?? goldUsdRef.current;
                 const btcGold = btcUsd != null && goldNow != null && goldNow > 0 ? btcUsd / goldNow : null;
+                const btcSats      = prices["crypto:BTC"]?.priceSEK;
+                const bigMacSats   = btcSats != null && btcSats > 0 ? Math.round((bigMacSEK / btcSats) * 1e8) : null;
                 const rateRows = [
-                  { key: "usd-sek",  label: "USD / SEK",  value: usdSek  != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",  color: "#38bdf8" },
-                  { key: "eur-sek",  label: "EUR / SEK",  value: eurSek  != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",  color: "#a78bfa" },
-                  { key: "sek-jpy",  label: "SEK / JPY",  value: jpySek  != null ? (1/jpySek).toFixed(4) : "—", chartId: "SEK_JPY",  color: "#f59e0b" },
-                  { key: "btc-usd",  label: "BTC / USD",  value: btcUsd  != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",  color: "#f59e0b" },
-                  { key: "btc-gold", label: "BTC / GOLD", value: btcGold != null ? btcGold.toFixed(2) + " oz" : "—", chartId: "BTC_GOLD", color: "#fb923c" },
+                  { key: "usd-sek",    label: "USD / SEK",       value: usdSek     != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",   color: "#38bdf8" },
+                  { key: "eur-sek",    label: "EUR / SEK",       value: eurSek     != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",   color: "#a78bfa" },
+                  { key: "sek-jpy",    label: "SEK / JPY",       value: jpySek     != null ? (1/jpySek).toFixed(4) : "—", chartId: "SEK_JPY",   color: "#f59e0b" },
+                  { key: "btc-usd",    label: "BTC / USD",       value: btcUsd     != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",   color: "#f59e0b" },
+                  { key: "btc-gold",   label: "BTC / GOLD",      value: btcGold    != null ? btcGold.toFixed(2) + " oz"  : "—", chartId: "BTC_GOLD",  color: "#fb923c" },
+                  { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacSats != null ? bigMacSats.toLocaleString("sv-SE") + " sats" : "—", chartId: "BIGMAC_SATS", color: "#22d3a5" },
                 ];
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -1469,7 +1494,7 @@ export default function App() {
         <ChartModal holding={selectedHolding} onClose={() => setSelectedHolding(null)} usdSekRate={usdSekRate} prices={prices} />
       )}
       {selectedRate && (
-        <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={prices} usdSekRate={usdSekRate} />
+        <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={prices} usdSekRate={usdSekRate} bigMacSEK={bigMacSEK} />
       )}
     </>
   );

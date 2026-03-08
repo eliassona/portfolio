@@ -112,7 +112,10 @@ app.get('/api/yahoo', (req, res) => {
 // Config endpoint — exposes non-sensitive display settings to the frontend
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
-  res.json({ display: config.display ?? { currency: 'SEK' } });
+  res.json({
+    display:   config.display   ?? { currency: 'SEK' },
+    bigMacSEK: config.bigMacSEK ?? 54,
+  });
 });
 
 app.listen(PORT, () => {
