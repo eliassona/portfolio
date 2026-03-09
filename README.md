@@ -68,6 +68,20 @@ Set `display.currency` in `config.json` to show all values in any currency. Rest
 
 When a non-SEK currency is active, a badge appears in the header showing which currency is in use. Conversion uses live exchange rates already fetched from Frankfurter and CoinGecko — no extra API calls.
 
+## Exchange rate pairs
+The fiat currency pairs shown in the Exchange Rates panel are configurable in `config.json`. Add or remove pairs as needed — any two currencies supported by Frankfurter work:
+
+```json
+"exchangeRates": [
+  { "from": "USD", "to": "SEK" },
+  { "from": "EUR", "to": "SEK" },
+  { "from": "SEK", "to": "JPY" },
+  { "from": "GBP", "to": "SEK" }
+]
+```
+
+BTC/USD, BTC/GOLD, and 🍔 Big Mac are always shown and are not configurable here. The Big Mac price is set via `"bigMacSEK"` (default: 54).
+
 ## Auto-refresh
 The dashboard refreshes every 5 minutes automatically. A countdown timer in the header shows when the next refresh is due. When you return to a tab that was in the background, it refreshes immediately if a refresh was overdue.
 

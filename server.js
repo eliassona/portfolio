@@ -113,8 +113,9 @@ app.get('/api/yahoo', (req, res) => {
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
   res.json({
-    display:   config.display   ?? { currency: 'SEK' },
-    bigMacSEK: config.bigMacSEK ?? 54,
+    display:       config.display       ?? { currency: 'SEK' },
+    bigMacSEK:     config.bigMacSEK     ?? 54,
+    exchangeRates: config.exchangeRates ?? [],
   });
 });
 

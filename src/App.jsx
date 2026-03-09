@@ -300,18 +300,21 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
       const now = new Date();
       let data  = null;
 
-      if (rate.chartId === "USD_SEK" || rate.chartId === "EUR_SEK" || rate.chartId === "SEK_JPY") {
-        // Frankfurter historical forex
-        const fromSym = rate.chartId === "EUR_SEK" ? "EUR" : rate.chartId === "USD_SEK" ? "USD" : "SEK";
-        const toSym   = rate.chartId === "SEK_JPY" ? "JPY" : "SEK";
+      // Detect dynamic fiat pair: chartId looks like "USD_SEK", "EUR_JPY" etc — two 3-letter codes
+      const fiatMatch = rate.chartId.match(/^([A-Z]{3})_([A-Z]{3})$/);
+      if (fiatMatch && rate.chartId !== "BTC_USD") {
+        const fromSym = fiatMatch[1];
+        const toSym   = fiatMatch[2];
+        // Frankfurter uses EUR as base; fetch both sides vs EUR then compute ratio
+        const baseFetch = fromSym === "EUR" ? "EUR" : fromSym === "SEK" ? "SEK" : fromSym;
         let startDate;
         if      (timeframe === "1W")  startDate = new Date(now - 7*86400000);
         else if (timeframe === "1M")  startDate = new Date(now - 30*86400000);
         else if (timeframe === "YTD") startDate = new Date(now.getFullYear(), 0, 1);
         else                          startDate = new Date(now - 365*86400000);
-        const from = startDate.toISOString().slice(0,10);
-        const to   = now.toISOString().slice(0,10);
-        const res  = await fetch(`https://api.frankfurter.app/${from}..${to}?from=${fromSym}&to=${toSym}`);
+        const fromDate = startDate.toISOString().slice(0,10);
+        const toDate   = now.toISOString().slice(0,10);
+        const res  = await fetch(`https://api.frankfurter.app/${fromDate}..${toDate}?from=${fromSym}&to=${toSym}`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -417,7 +420,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
       if (rate.chartId === "BTC_USD")      return new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(v);
       if (rate.chartId === "BTC_GOLD")     return v.toFixed(2);
       if (rate.chartId === "BIGMAC_SATS")  return Math.round(v).toLocaleString("sv-SE") + " sats";
-      return v.toFixed(rate.chartId === "SEK_JPY" ? 3 : 2);
+      return v.toFixed(rate.chartId.includes("JPY") ? 3 : 2);
     };
 
     return (
@@ -491,6 +494,7 @@ export default function App() {
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
+  const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
 
@@ -819,6 +823,7 @@ export default function App() {
       .then(cfg => {
         if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase());
         if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
+        if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
       })
       .catch(() => {}); // silently fall back to SEK
   }, []);
@@ -1268,7 +1273,7 @@ export default function App() {
           <div className={`fade-in ${animated ? "visible" : ""}`} style={{ transitionDelay: "80ms" }}>
             {stockRows.length     > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
             {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
-            {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Currencies" sourceLabel="via Frankfurter" showSparkline={false} />}
+            {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Cash" sourceLabel="via Frankfurter" showSparkline={false} />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
             <IndexesTable />
@@ -1353,7 +1358,7 @@ export default function App() {
             {forexRows.length > 0 && (
               <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Currencies</h2>
+                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Cash</h2>
                   <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
@@ -1441,19 +1446,32 @@ export default function App() {
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "210ms" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
               {(() => {
-                const usdSek  = prices["forex:USD"]?.priceSEK;
-                const eurSek  = prices["forex:EUR"]?.priceSEK;
-                const jpySek  = prices["forex:JPY"]?.priceSEK;
+                const PAIR_COLORS = ["#38bdf8","#a78bfa","#f59e0b","#34d399","#f472b6","#60a5fa","#fb923c"];
                 const btcSek  = prices["crypto:BTC"]?.priceSEK;
+                const usdSek  = prices["forex:USD"]?.priceSEK;
                 const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
                 const goldNow = goldUsd ?? goldUsdRef.current;
                 const btcGold = btcUsd != null && goldNow != null && goldNow > 0 ? btcUsd / goldNow : null;
-                const btcSats      = prices["crypto:BTC"]?.priceSEK;
-                const bigMacSats   = btcSats != null && btcSats > 0 ? Math.round((bigMacSEK / btcSats) * 1e8) : null;
+                const bigMacSats = btcSek != null && btcSek > 0 ? Math.round((bigMacSEK / btcSek) * 1e8) : null;
+
+                // Dynamic fiat pairs from config
+                const fiatRows = fiatRates.map((pair, i) => {
+                  const { from, to } = pair;
+                  // Invert if "to" is the base currency we price things in (SEK)
+                  const fromSek = from === "SEK" ? 1 : prices[`forex:${from}`]?.priceSEK;
+                  const toSek   = to   === "SEK" ? 1 : prices[`forex:${to}`]?.priceSEK;
+                  let value = "—";
+                  if (fromSek != null && toSek != null && toSek > 0) {
+                    const rate = fromSek / toSek; // e.g. USD/SEK: fromSek(~10.5) / toSek(1) = 10.5
+                    const decimals = to === "JPY" || from === "JPY" ? 2 : 2;
+                    value = rate.toFixed(decimals);
+                  }
+                  const chartId = `${from}_${to}`;
+                  return { key: chartId.toLowerCase(), label: `${from} / ${to}`, value, chartId, color: PAIR_COLORS[i % PAIR_COLORS.length] };
+                });
+
                 const rateRows = [
-                  { key: "usd-sek",    label: "USD / SEK",       value: usdSek     != null ? usdSek.toFixed(2)     : "—", chartId: "USD_SEK",   color: "#38bdf8" },
-                  { key: "eur-sek",    label: "EUR / SEK",       value: eurSek     != null ? eurSek.toFixed(2)     : "—", chartId: "EUR_SEK",   color: "#a78bfa" },
-                  { key: "sek-jpy",    label: "SEK / JPY",       value: jpySek     != null ? (1/jpySek).toFixed(4) : "—", chartId: "SEK_JPY",   color: "#f59e0b" },
+                  ...fiatRows,
                   { key: "btc-usd",    label: "BTC / USD",       value: btcUsd     != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",   color: "#f59e0b" },
                   { key: "btc-gold",   label: "BTC / GOLD",      value: btcGold    != null ? btcGold.toFixed(2) + " oz"  : "—", chartId: "BTC_GOLD",  color: "#fb923c" },
                   { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacSats != null ? bigMacSats.toLocaleString("sv-SE") + " sats" : "—", chartId: "BIGMAC_SATS", color: "#22d3a5" },
