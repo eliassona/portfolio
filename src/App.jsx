@@ -697,8 +697,9 @@ export default function App() {
       const uniqueCryptoKeys = [...new Set(cryptoHoldings.map(getPriceKey))];
       const uniqueForexKeys  = [...new Set(forexHoldings.map(getPriceKey))];
 
-      // Always fetch USD, EUR, JPY for the exchange rate strip, plus any held currencies
-      const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY"])];
+      // Always fetch USD, EUR, JPY + any currencies in configured exchange rate pairs
+      const fiatPairSymbols = fiatRates.flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
+      const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY", ...fiatPairSymbols])];
 
       const [usdSek, forexResults] = await Promise.all([
         fetchUsdSek(),
@@ -737,8 +738,9 @@ export default function App() {
         const sym = key.replace(/^forex:/, "");
         results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
       }
-      // Always store USD, EUR, JPY rates so the exchange rate strip always shows
-      for (const sym of ["USD", "EUR", "JPY"]) {
+      // Always store USD, EUR, JPY + fiat pair currencies so the exchange rate strip always shows
+      const alwaysStore = [...new Set(["USD", "EUR", "JPY", ...fiatPairSymbols])];
+      for (const sym of alwaysStore) {
         const key = `forex:${sym}`;
         if (!results[key]) {
           results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
@@ -1459,8 +1461,9 @@ export default function App() {
                 const fiatRows = fiatRates.map((pair, i) => {
                   const { from, to } = pair;
                   // Invert if "to" is the base currency we price things in (SEK)
-                  const fromSek = from === "SEK" ? 1 : prices[`forex:${from}`]?.priceSEK;
-                  const toSek   = to   === "SEK" ? 1 : prices[`forex:${to}`]?.priceSEK;
+                  const resolveSek = sym => sym === "SEK" ? 1 : sym === "BTC" ? prices["crypto:BTC"]?.priceSEK : prices[`forex:${sym}`]?.priceSEK;
+                  const fromSek = resolveSek(from);
+                  const toSek   = resolveSek(to);
                   let value = "—";
                   if (fromSek != null && toSek != null && toSek > 0) {
                     const rate = fromSek / toSek; // e.g. USD/SEK: fromSek(~10.5) / toSek(1) = 10.5
