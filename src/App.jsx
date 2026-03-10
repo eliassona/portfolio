@@ -492,6 +492,7 @@ export default function App() {
   const [indexes, setIndexes]                 = useState([]);
   const [goldUsd, setGoldUsd]                 = useState(null);
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
+  const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
   const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
@@ -502,6 +503,11 @@ export default function App() {
 
   // Keep goldUsdRef in sync with goldUsd state
   useEffect(() => { goldUsdRef.current = goldUsd; }, [goldUsd]);
+
+  // Keep fiatSymbolsRef in sync with fiatRates state
+  useEffect(() => {
+    fiatSymbolsRef.current = fiatRates.flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
+  }, [fiatRates]);
 
   // Countdown ticker (no dependency on fetchAll)
   useEffect(() => {
@@ -684,7 +690,7 @@ export default function App() {
   };
 
   // ── Fetch all, deduplicating by priceKey ───────────────────────────────────
-  const fetchAll = useCallback(async (extraForexSymbols = []) => {
+  const fetchAll = useCallback(async (extraForexSymbols = fiatSymbolsRef.current) => {
     setFetchStatus("loading");
     try {
       const stockHoldings  = holdings.filter(h => h.type === "stock");
