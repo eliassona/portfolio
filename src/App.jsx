@@ -684,7 +684,7 @@ export default function App() {
   };
 
   // ── Fetch all, deduplicating by priceKey ───────────────────────────────────
-  const fetchAll = useCallback(async () => {
+  const fetchAll = useCallback(async (extraForexSymbols = []) => {
     setFetchStatus("loading");
     try {
       const stockHoldings  = holdings.filter(h => h.type === "stock");
@@ -698,8 +698,7 @@ export default function App() {
       const uniqueForexKeys  = [...new Set(forexHoldings.map(getPriceKey))];
 
       // Always fetch USD, EUR, JPY + any currencies in configured exchange rate pairs
-      const fiatPairSymbols = fiatRates.flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
-      const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY", ...fiatPairSymbols])];
+      const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY", ...extraForexSymbols])];
 
       const [usdSek, forexResults] = await Promise.all([
         fetchUsdSek(),
@@ -739,7 +738,7 @@ export default function App() {
         results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
       }
       // Always store USD, EUR, JPY + fiat pair currencies so the exchange rate strip always shows
-      const alwaysStore = [...new Set(["USD", "EUR", "JPY", ...fiatPairSymbols])];
+      const alwaysStore = [...new Set(["USD", "EUR", "JPY", ...extraForexSymbols])];
       for (const sym of alwaysStore) {
         const key = `forex:${sym}`;
         if (!results[key]) {
@@ -818,9 +817,7 @@ export default function App() {
     }
   }, []); // eslint-disable-line
 
-  useEffect(() => { fetchAll(); }, []); // eslint-disable-line
-
-  // Load display currency from config
+  // Load config first, then fetchAll so fiatRates is populated before forex symbols are resolved
   useEffect(() => {
     fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/config`)
       .then(r => r.json())
@@ -828,9 +825,12 @@ export default function App() {
         if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase());
         if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
         if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
+        // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
+        const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
+        fetchAll(fiatSymbols);
       })
-      .catch(() => {}); // silently fall back to SEK
-  }, []);
+      .catch(() => { fetchAll([]); }); // config unreachable — fetch anyway with no extras
+  }, []); // eslint-disable-line
 
   // Auto-refresh every 5 minutes — placed after fetchAll is defined.
   // Also refreshes immediately on visibility change if the tab was hidden
