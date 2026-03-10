@@ -543,15 +543,16 @@ export default function App() {
   // ── Crypto via CoinGecko ───────────────────────────────────────────────────
   const fetchCrypto = async (symbol) => {
     const id = COINGECKO_IDS[symbol];
-    if (!id) return { priceSEK: null, change: null, historySEK: null };
+    if (!id) return { priceSEK: null, priceUSD: null, change: null, historySEK: null };
     const [priceRes, historyRes] = await Promise.all([
-      fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=sek&include_24hr_change=true`),
+      fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${id}&vs_currencies=sek,usd&include_24hr_change=true`),
       fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=sek&days=30&interval=daily`)
     ]);
     const priceData   = await priceRes.json();
     const historyData = await historyRes.json();
     return {
       priceSEK:   priceData?.[id]?.sek ?? null,
+      priceUSD:   priceData?.[id]?.usd ?? null,
       change:     priceData?.[id]?.sek_24h_change ?? null,
       historySEK: historyData?.prices ? historyData.prices.map(([, p]) => p) : null,
     };
@@ -579,15 +580,11 @@ export default function App() {
       const sekPerEur = rates["SEK"] ?? 1;
       return Object.fromEntries(symbols.map(sym => {
         const rateToEur = rates[sym] ?? null;
-        // For non-SEK symbols, build history by dividing SEK/EUR history by their EUR rate
-        let historySEK = null;
-        if (sekHistory && rateToEur != null && rateToEur !== 0) {
-          if (sym === "USD" || sym === "SEK") {
-            historySEK = sekHistory.map(s => s / rateToEur);
-          } else {
-            historySEK = sekHistory.map(s => s / rateToEur);
-          }
-        }
+        // History: derive per-symbol SEK history from EUR/SEK history ÷ their EUR rate
+        // (Frankfurter-based, daily — acceptable for slow-moving fiat pairs)
+        const historySEK = (sekHistory && rateToEur != null && rateToEur !== 0)
+          ? sekHistory.map(s => s / rateToEur)
+          : null;
         return [sym, { priceSEK: rateToEur != null ? sekPerEur / rateToEur : null, change: null, historySEK }];
       }));
     } catch {
@@ -595,8 +592,16 @@ export default function App() {
     }
   };
 
-  // ── USD/SEK via Frankfurter ────────────────────────────────────────────────
+  // ── USD/SEK via Yahoo Finance (real-time) ────────────────────────────────
   const fetchUsdSek = async () => {
+    try {
+      const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+      const res  = await fetch(`${alertServer}/api/yahoo?symbol=SEK%3DX&range=5d&interval=1d`);
+      const json = await res.json();
+      const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+      if (closes.length > 0) return closes[closes.length - 1];
+    } catch { /* fall through */ }
+    // Fallback to Frankfurter if Yahoo fails
     try {
       const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK");
       const data = await res.json();
@@ -739,11 +744,8 @@ export default function App() {
           results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
         }
       }
-      // Always store USD/EUR/JPY so the rate strip works even without forex holdings
-      for (const sym of ["USD", "EUR", "JPY"]) {
-        const key = `forex:${sym}`;
-        if (!results[key] && forexResults[sym]) results[key] = forexResults[sym];
-      }
+      // Patch USD price with the real-time Yahoo rate (Frankfurter is ECB, updated once/day)
+      if (results["forex:USD"]) results["forex:USD"].priceSEK = usdSek;
 
       setPrices(results);
 
@@ -1448,8 +1450,7 @@ export default function App() {
               {(() => {
                 const PAIR_COLORS = ["#38bdf8","#a78bfa","#f59e0b","#34d399","#f472b6","#60a5fa","#fb923c"];
                 const btcSek  = prices["crypto:BTC"]?.priceSEK;
-                const usdSek  = prices["forex:USD"]?.priceSEK;
-                const btcUsd  = btcSek != null && usdSek != null && usdSek > 0 ? btcSek / usdSek : null;
+                const btcUsd  = prices["crypto:BTC"]?.priceUSD ?? null; // direct from CoinGecko, not derived
                 const goldNow = goldUsd ?? goldUsdRef.current;
                 const btcGold = btcUsd != null && goldNow != null && goldNow > 0 ? btcUsd / goldNow : null;
                 const bigMacSats = btcSek != null && btcSek > 0 ? Math.round((bigMacSEK / btcSek) * 1e8) : null;
