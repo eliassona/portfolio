@@ -483,7 +483,8 @@ export default function App() {
 
   const [prices, setPrices]           = useState({});
   const [dividends, setDividends]     = useState([]);
-  const [usdSekRate, setUsdSekRate]   = useState(10.35);
+  const [usdSekRate, setUsdSekRate]         = useState(10.35);
+  const [prevUsdSekRate, setPrevUsdSekRate] = useState(10.35); // yesterday's rate for accurate Day P&L
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [lastFetched, setLastFetched] = useState(null);
   const [animated, setAnimated]       = useState(false);
@@ -600,21 +601,42 @@ export default function App() {
     }
   };
 
-  // ── USD/SEK via Yahoo Finance (real-time) ────────────────────────────────
+  // ── USD/SEK via Yahoo Finance (real-time) + yesterday via Frankfurter ───
   const fetchUsdSek = async () => {
+    // Today: Yahoo Finance real-time
+    let today = 10.35;
     try {
       const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
-      const res  = await fetch(`${alertServer}/api/yahoo?symbol=SEK%3DX&range=5d&interval=1d`);
-      const json = await res.json();
+      const res    = await fetch(`${alertServer}/api/yahoo?symbol=SEK%3DX&range=5d&interval=1d`);
+      const json   = await res.json();
       const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
-      if (closes.length > 0) return closes[closes.length - 1];
-    } catch { /* fall through */ }
-    // Fallback to Frankfurter if Yahoo fails
+      if (closes.length > 0) today = closes[closes.length - 1];
+    } catch { /* fall through to Frankfurter */ }
+    // Fallback today rate from Frankfurter
+    if (today === 10.35) {
+      try {
+        const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK");
+        const data = await res.json();
+        today = data?.rates?.SEK ?? 10.35;
+      } catch { /* use default */ }
+    }
+    // Yesterday: Frankfurter (ECB previous business day)
+    let yesterday = today;
     try {
-      const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK");
+      const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK&amount=1");
       const data = await res.json();
-      return data?.rates?.SEK ?? 10.35;
-    } catch { return 10.35; }
+      // Frankfurter /latest returns the most recent ECB rate date — fetch one day before that
+      const latestDate = data?.date;
+      if (latestDate) {
+        const prev = new Date(latestDate);
+        prev.setDate(prev.getDate() - 1);
+        const prevStr = prev.toISOString().slice(0, 10);
+        const prevRes  = await fetch(`https://api.frankfurter.app/${prevStr}?from=USD&to=SEK`);
+        const prevData = await prevRes.json();
+        yesterday = prevData?.rates?.SEK ?? today;
+      }
+    } catch { /* use today as fallback */ }
+    return { today, yesterday };
   };
 
   // ── Dividends: Finnhub + manual fallback ─────────────────────────────────
@@ -708,11 +730,12 @@ export default function App() {
       // Always fetch USD, EUR, JPY + any currencies in configured exchange rate pairs
       const uniqueForexSymbols = [...new Set([...forexHoldings.map(h => h.priceSymbol ?? h.symbol), "USD", "EUR", "JPY", ...extraForexSymbols])];
 
-      const [usdSek, forexResults] = await Promise.all([
+      const [{ today: usdSek, yesterday: usdSekPrev }, forexResults] = await Promise.all([
         fetchUsdSek(),
         fetchAllForex(uniqueForexSymbols),
       ]);
       setUsdSekRate(usdSek);
+      setPrevUsdSekRate(usdSekPrev);
 
       const results = {};
 
@@ -721,7 +744,9 @@ export default function App() {
         try {
           const { priceUSD, change, historyUSD } = await fetchStock(sym);
           results[key] = {
-            priceSEK:   priceUSD   != null ? priceUSD   * usdSek : null,
+            priceSEK:   priceUSD != null ? priceUSD * usdSek : null,
+            prevUSD,
+            priceUSD,
             historySEK: historyUSD != null ? historyUSD.map(v => v * usdSek) : null,
             change,
           };
@@ -911,8 +936,18 @@ export default function App() {
   const totalCost    = enriched.reduce((s, h) => s + h.costSEK, 0);
   const totalGain    = totalValue - totalCost;
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
-  const dayChange    = enriched.reduce((s, h) =>
-    h.priceSEK != null && h.change != null ? s + (h.priceSEK * h.change / 100) * h.shares : s, 0);
+  const dayChange = enriched.reduce((s, h) => {
+    if (h.priceSEK == null) return s;
+    if (h.type === "stock" && h.priceUSD != null && h.prevUSD != null) {
+      // Use actual USD prices × respective day's FX rate for accuracy
+      const todaySEK = h.priceUSD * usdSekRate;
+      const prevSEK  = h.prevUSD  * prevUsdSekRate;
+      return s + (todaySEK - prevSEK) * h.shares;
+    }
+    // Crypto/forex: change% is already in SEK terms (CoinGecko SEK 24h change)
+    if (h.change != null) return s + (h.priceSEK * h.change / 100) * h.shares;
+    return s;
+  }, 0);
   const isLoading    = fetchStatus === "loading";
 
   const priced = enriched.filter(h => h.change != null);
