@@ -116,6 +116,7 @@ app.get('/api/config', (req, res) => {
     display:       config.display       ?? { currency: 'SEK' },
     bigMacSEK:     config.bigMacSEK     ?? 54,
     exchangeRates: config.exchangeRates ?? [],
+    finnhubKey:    config.finnhubKey    ?? '',
   });
 });
 

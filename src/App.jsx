@@ -1,7 +1,7 @@
 import { useState, useEffect, useCallback, useRef } from "react";
 import holdingsData from "../holdings.json";
 
-const FINNHUB_KEY      = "cvt0nk1r01qhup0ti100cvt0nk1r01qhup0ti10g";
+const FINNHUB_KEY      = ""; // loaded from config.json via /api/config
 const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
 const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:3001`;
 const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
@@ -494,6 +494,8 @@ export default function App() {
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
+  const [finnhubKey, setFinnhubKey]           = useState("");    // loaded from config.json
+  const finnhubKeyRef                         = useRef("");      // ref so fetchAll always has latest key
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
   const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
@@ -529,7 +531,7 @@ export default function App() {
   const fetchStock = async (symbol) => {
     const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
     const [quoteRes, historyRes] = await Promise.all([
-      fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${FINNHUB_KEY}`),
+      fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${finnhubKeyRef.current}`),
       fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(symbol)}&range=1mo&interval=1d`),
     ]);
     const quote = await quoteRes.json();
@@ -631,7 +633,7 @@ export default function App() {
 
     for (const sym of stockSymbols) {
       try {
-        const res  = await fetch(`https://finnhub.io/api/v1/stock/dividend2?symbol=${sym}&from=${from}&to=${to}&token=${FINNHUB_KEY}`);
+        const res  = await fetch(`https://finnhub.io/api/v1/stock/dividend2?symbol=${sym}&from=${from}&to=${to}&token=${finnhubKeyRef.current}`);
         const data = await res.json();
         if (data?.data?.length) {
           symbolsWithFinnhubData.add(sym);
@@ -831,6 +833,7 @@ export default function App() {
         if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase());
         if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
         if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
+        if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
         // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
         const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
         fetchAll(fiatSymbols);
@@ -1424,6 +1427,32 @@ export default function App() {
                     }
                     const rows = Object.values(bySymbol).sort((a, b) => new Date(a.exDate) - new Date(b.exDate));
                     const grandTotal = rows.reduce((s, d) => s + d.payoutSEK, 0);
+
+                    // Monthly average: annualise each holding's dividend then divide by 12
+                    // Manual: use dividendFrequency to determine payments/year
+                    // Finnhub: assume quarterly (4x/year)
+                    const monthlyAvg = (() => {
+                      let annual = 0;
+                      const seen = new Set();
+                      for (const h of holdings.filter(hh => hh.type === "stock")) {
+                        const sym = h.priceSymbol ?? h.symbol;
+                        if (h.dividendPerShare) {
+                          // Manual dividend
+                          const paymentsPerYear = (h.dividendFrequency ?? "quarterly") === "monthly" ? 12 : 4;
+                          annual += h.dividendPerShare * h.shares * paymentsPerYear * usdSekRate;
+                        } else if (!seen.has(sym)) {
+                          // Finnhub dividend — use amountUSD from dividends array if available
+                          seen.add(sym);
+                          const finnhubDiv = dividends.find(d => d.symbol === sym && d.source !== "manual");
+                          if (finnhubDiv) {
+                            const totalShares = holdings.filter(hh => hh.type === "stock" && (hh.priceSymbol ?? hh.symbol) === sym).reduce((s, hh) => s + hh.shares, 0);
+                            annual += (finnhubDiv.amount ?? 0) * totalShares * 4 * usdSekRate;
+                          }
+                        }
+                      }
+                      return annual / 12;
+                    })();
+
                     return <>
                       {rows.map(d => (
                         <div key={d.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
@@ -1442,9 +1471,15 @@ export default function App() {
                           </div>
                         </div>
                       ))}
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2 }}>
-                        <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>Total</span>
-                        <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(grandTotal)}</span>
+                      <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2, display: "flex", flexDirection: "column", gap: 6 }}>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>Next 30 days</span>
+                          <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(grandTotal)}</span>
+                        </div>
+                        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>~ Monthly avg</span>
+                          <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#a78bfa" }}>{fmtSEK(monthlyAvg)}</span>
+                        </div>
                       </div>
                     </>;
                   })()}
