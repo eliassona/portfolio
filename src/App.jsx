@@ -640,31 +640,33 @@ export default function App() {
   };
 
   // ── Dividends: Finnhub + manual fallback ─────────────────────────────────
-  // Fetches upcoming dividends from Finnhub for each stock symbol.
-  // For symbols where Finnhub has nothing (e.g. newly listed preferreds like STRC/STRD/STRF),
-  // falls back to dividendPerShare + dividendFrequency fields on the holding in holdings.json.
+  // Fetches upcoming dividends via Yahoo Finance proxy (Finnhub dividend endpoint is paid-only).
+  // Falls back to dividendPerShare + dividendFrequency fields on the holding in holdings.json.
   const fetchDividends = async (stockSymbols) => {
     const today    = new Date();
     const in30days = new Date(today.getTime() + 30 * 86400 * 1000);
-    const from     = today.toISOString().slice(0, 10);
-    const to       = in30days.toISOString().slice(0, 10);
+    const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
 
-    // Track which symbols Finnhub returned data for
-    const symbolsWithFinnhubData = new Set();
+    const symbolsWithData = new Set();
     const results = [];
 
     for (const sym of stockSymbols) {
       try {
-        const res  = await fetch(`https://finnhub.io/api/v1/stock/dividend2?symbol=${sym}&from=${from}&to=${to}&token=${finnhubKeyRef.current}`);
-        const data = await res.json();
-        if (data?.data?.length) {
-          symbolsWithFinnhubData.add(sym);
-          for (const d of data.data) {
-            results.push({ symbol: sym, source: "finnhub", ...d });
+        // Fetch 3 months to catch upcoming ex-dividend dates
+        const res  = await fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=3mo&interval=1d&events=div`);
+        const json = await res.json();
+        const divEvents = json?.chart?.result?.[0]?.events?.dividends ?? {};
+        const todayTs   = Math.floor(today.getTime() / 1000);
+        const futureTs  = Math.floor(in30days.getTime() / 1000);
+        for (const ev of Object.values(divEvents)) {
+          if (ev.date >= todayTs && ev.date <= futureTs) {
+            symbolsWithData.add(sym);
+            const exDate = new Date(ev.date * 1000).toISOString().slice(0, 10);
+            results.push({ symbol: sym, source: "yahoo", amount: ev.amount, exDate });
           }
         }
       } catch { /* skip */ }
-      await new Promise(r => setTimeout(r, 250));
+      await new Promise(r => setTimeout(r, 150));
     }
 
     // For symbols with no Finnhub data, check if holdings.json has manual dividend info.
@@ -675,7 +677,7 @@ export default function App() {
     for (const h of holdings) {
       if (h.type !== "stock") continue;
       const sym = h.priceSymbol ?? h.symbol;
-      if (symbolsWithFinnhubData.has(sym)) continue;
+      if (symbolsWithData.has(sym)) continue;
       if (!h.dividendPerShare) continue;
 
       const freq = h.dividendFrequency ?? "quarterly";
@@ -742,7 +744,7 @@ export default function App() {
       for (const key of uniqueStockKeys) {
         const sym = key.replace(/^stock:/, "");
         try {
-          const { priceUSD, change, historyUSD } = await fetchStock(sym);
+          const { priceUSD, prevUSD, change, historyUSD } = await fetchStock(sym);
           results[key] = {
             priceSEK:   priceUSD != null ? priceUSD * usdSek : null,
             prevUSD,
