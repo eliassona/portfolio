@@ -476,6 +476,132 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
   );
 }
 
+
+// ── Index chart modal ─────────────────────────────────────────────────────────
+function IndexChartModal({ index, onClose }) {
+  const [tf, setTf]               = useState("1M");
+  const [chartData, setChartData] = useState(null);
+  const [loading, setLoading]     = useState(false);
+  const [error, setError]         = useState(null);
+  const cache = useRef({});
+  const timeframes = ["1W", "1M", "YTD", "1Y", "5Y"];
+
+  const tfToRange = t => ({ "1W": "5d", "1M": "1mo", "YTD": "ytd", "1Y": "1y", "5Y": "5y" })[t] ?? "1mo";
+  const tfToInterval = t => t === "1W" ? "1h" : t === "5Y" ? "1wk" : "1d";
+
+  const fetchData = useCallback(async (timeframe) => {
+    const cacheKey = `idx-${index.symbol}-${timeframe}`;
+    if (cache.current[cacheKey]) { setChartData(cache.current[cacheKey]); return; }
+    setLoading(true); setError(null); setChartData(null);
+    try {
+      const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+      const res  = await fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(index.symbol)}&range=${tfToRange(timeframe)}&interval=${tfToInterval(timeframe)}`);
+      const json = await res.json();
+      const result    = json?.chart?.result?.[0];
+      const timestamps = result?.timestamp ?? [];
+      const closes    = result?.indicators?.quote?.[0]?.close ?? [];
+      const data = timestamps
+        .map((t, i) => ({ t: t * 1000, v: closes[i] }))
+        .filter(d => d.v != null);
+      if (data.length < 2) throw new Error("No data available");
+      cache.current[cacheKey] = data;
+      setChartData(data);
+    } catch (e) {
+      setError(e.message);
+    } finally {
+      setLoading(false);
+    }
+  }, [index.symbol]);
+
+  useEffect(() => { fetchData(tf); }, [tf]); // eslint-disable-line
+  useEffect(() => {
+    const handler = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const renderChart = () => {
+    if (loading) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center" }}>
+        <div style={{ width: 32, height: 32, borderRadius: "50%", border: "2px solid rgba(255,255,255,0.1)", borderTop: "2px solid #22d3a5", animation: "spin 0.8s linear infinite" }} />
+      </div>
+    );
+    if (error) return (
+      <div style={{ height: 220, display: "flex", alignItems: "center", justifyContent: "center", color: "#f87171", fontSize: 12 }}>{error}</div>
+    );
+    if (!chartData) return null;
+
+    const W = 520, H = 200, PAD = { t: 10, r: 10, b: 28, l: 72 };
+    const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
+    const vals = chartData.map(d => d.v);
+    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const range = maxV - minV || 1;
+    const xi = i => PAD.l + (i / (chartData.length - 1)) * cW;
+    const yi = v => PAD.t + cH - ((v - minV) / range) * cH;
+    const pts     = chartData.map((d, i) => `${xi(i)},${yi(d.v)}`).join(" ");
+    const fillPts = `${xi(0)},${PAD.t+cH} ${pts} ${xi(chartData.length-1)},${PAD.t+cH}`;
+    const color   = chartData[chartData.length-1].v >= chartData[0].v ? "#22d3a5" : "#f87171";
+    const yTicks  = [0, 0.33, 0.67, 1].map(p => ({ v: minV + p*range, y: PAD.t+cH - p*cH }));
+    const xIdxs   = [0, Math.floor(chartData.length/3), Math.floor(2*chartData.length/3), chartData.length-1];
+    const fmtDate = ts => new Date(ts).toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
+    const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
+    const fmtVal = v => new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(v);
+
+    return (
+      <>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 8 }}>
+          <span style={{ fontSize: 11, color: "#4b5563" }}>{fmtDate(chartData[0].t)} — {fmtDate(chartData[chartData.length-1].t)}</span>
+          <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 13, fontWeight: 700, color }}>{changePct >= 0 ? "+" : ""}{changePct.toFixed(2)}%</span>
+        </div>
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }}>
+          <defs>
+            <linearGradient id="idxChartFill" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%" stopColor={color} stopOpacity="0.18" />
+              <stop offset="100%" stopColor={color} stopOpacity="0" />
+            </linearGradient>
+          </defs>
+          {yTicks.map((t, i) => <line key={i} x1={PAD.l} x2={W-PAD.r} y1={t.y} y2={t.y} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />)}
+          <polygon points={fillPts} fill="url(#idxChartFill)" />
+          <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+          {yTicks.map((t, i) => (
+            <text key={i} x={PAD.l-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#4b5563">{fmtVal(t.v)}</text>
+          ))}
+          {xIdxs.map(i => (
+            <text key={i} x={xi(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#4b5563">{fmtDate(chartData[i].t)}</text>
+          ))}
+        </svg>
+      </>
+    );
+  };
+
+  const currentVal = chartData ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(chartData[chartData.length-1].v) : index.value != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(index.value) : "—";
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ width: 40, height: 40, borderRadius: 10, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(99,102,241,0.15)", fontSize: 18 }}>📈</div>
+            <div>
+              <div style={{ fontWeight: 700, fontSize: 18 }}>{index.name}</div>
+              <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{index.symbol} · {currentVal}</div>
+            </div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+          {timeframes.map(t => (
+            <button key={t} onClick={() => setTf(t)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer", background: tf === t ? "#22d3a5" : "rgba(255,255,255,0.06)", color: tf === t ? "#080c14" : "#6b7280", fontFamily: "'DM Sans',sans-serif" }}>
+              {t}
+            </button>
+          ))}
+        </div>
+        {renderChart()}
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const holdings = holdingsData
     .filter(h => h.type !== "realestate" && h.type !== "debt")
@@ -501,6 +627,7 @@ export default function App() {
   const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
+  const [selectedIndex, setSelectedIndex]     = useState(null); // for market index chart modal
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
@@ -1016,7 +1143,7 @@ export default function App() {
             const gainPct = gain != null && h.purchasePriceSEK ? (gain / h.purchasePriceSEK) * 100 : null;
             const isPos   = (gain ?? 0) >= 0;
             return (
-              <tr key={h.id} className="row-hover" onClick={() => setSelectedHolding(h)} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s", cursor: "pointer" }}>
+              <tr key={h.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                 <td style={{ padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, flexShrink: 0 }}>🏠</div>
@@ -1067,7 +1194,7 @@ export default function App() {
           {rows.map(h => {
             const monthlyCost = h.balanceSEK != null && h.interestRate != null ? (h.balanceSEK * (h.interestRate / 100)) / 12 : null;
             return (
-              <tr key={h.id} className="row-hover" onClick={() => setSelectedHolding(h)} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)", transition: "background 0.15s", cursor: "pointer" }}>
+              <tr key={h.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
                 <td style={{ padding: "12px 14px" }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
                     <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(248,113,113,0.1)", flexShrink: 0 }}>💳</div>
@@ -1120,7 +1247,7 @@ export default function App() {
                       : new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value))
                   : "—";
                 return (
-                  <div key={idx.symbol} className="row-hover" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s" }}>
+                  <div key={idx.symbol} className="row-hover" onClick={() => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: "pointer" }}>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{idx.name}</div>
                       <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{idx.symbol}</div>
@@ -1595,6 +1722,9 @@ export default function App() {
       )}
       {selectedRate && (
         <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={prices} usdSekRate={usdSekRate} bigMacSEK={bigMacSEK} />
+      )}
+      {selectedIndex && (
+        <IndexChartModal index={selectedIndex} onClose={() => setSelectedIndex(null)} />
       )}
     </>
   );
