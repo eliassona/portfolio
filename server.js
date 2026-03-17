@@ -24,6 +24,10 @@ app.post('/api/alert', async (req, res) => {
   if (!alerts?.length) return res.json({ ok: true });
 
   const config = loadConfig(); // reload on each request so changes take effect without restart
+  if (!config.email?.smtp) {
+    console.warn('Alert skipped: no email config in config.json');
+    return res.json({ ok: true, skipped: true });
+  }
   const { smtp } = config.email;
 
   const transporter = nodemailer.createTransport({

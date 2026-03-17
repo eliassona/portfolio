@@ -419,7 +419,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
     const fmtY = v => {
       if (rate.chartId === "BTC_USD")      return new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(v);
       if (rate.chartId === "BTC_GOLD")     return v.toFixed(2);
-      if (rate.chartId === "BIGMAC_SATS")  return Math.round(v).toLocaleString("sv-SE") + " sats";
+      if (rate.chartId === "BIGMAC_SATS")  return (v / 100).toFixed(2) + " bits";
       return v.toFixed(rate.chartId.includes("JPY") ? 3 : 2);
     };
 
@@ -937,7 +937,7 @@ export default function App() {
       goldUsdRef.current = goldFromIndex;
 
       // Check for large movers and send email alert for any not already alerted today
-      const alertCandidates = Object.entries(results)
+      const alertCandidatesWithKeys = Object.entries(results)
         .filter(([key, p]) => {
           if (p.change == null || Math.abs(p.change) < ALERT_THRESHOLD) return false;
           if (alertedToday.current.has(key)) return false;
@@ -945,22 +945,22 @@ export default function App() {
         })
         .map(([key, p]) => {
           const h = holdings.find(h => getPriceKey(h) === key);
-          return h ? { symbol: getDisplaySymbol(h), name: h.name, change: p.change, priceSEK: p.priceSEK } : null;
+          return h ? { key, symbol: getDisplaySymbol(h), name: h.name, change: p.change, priceSEK: p.priceSEK } : null;
         })
         .filter(Boolean);
 
-      if (alertCandidates.length > 0) {
+      if (alertCandidatesWithKeys.length > 0) {
+        // Mark as alerted immediately before the fetch to prevent duplicate sends on slow refreshes
+        alertCandidatesWithKeys.forEach(a => alertedToday.current.add(a.key));
         try {
           await fetch(`${ALERT_SERVER}/api/alert`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ alerts: alertCandidates }),
+            body: JSON.stringify({ alerts: alertCandidatesWithKeys.map(({ key, ...rest }) => rest) }),
           });
-          alertCandidates.forEach(a => alertedToday.current.add(
-            // re-derive the key from holdings to mark as alerted
-            getPriceKey(holdings.find(h => getDisplaySymbol(h) === a.symbol) ?? {type:'',symbol:''})
-          ));
         } catch (err) {
+          // Unmark on failure so it retries next refresh
+          alertCandidatesWithKeys.forEach(a => alertedToday.current.delete(a.key));
           console.warn('Alert server unreachable:', err.message);
         }
       }
@@ -1660,7 +1660,8 @@ export default function App() {
                 const btcUsd  = prices["crypto:BTC"]?.priceUSD ?? null; // direct from CoinGecko, not derived
                 const goldNow = goldUsd ?? goldUsdRef.current;
                 const btcGold = btcUsd != null && goldNow != null && goldNow > 0 ? btcUsd / goldNow : null;
-                const bigMacSats = btcSek != null && btcSek > 0 ? Math.round((bigMacSEK / btcSek) * 1e8) : null;
+                const bigMacSats  = btcSek != null && btcSek > 0 ? Math.round((bigMacSEK / btcSek) * 1e8) : null;
+                const bigMacBits  = bigMacSats != null ? (bigMacSats / 100) : null;
 
                 // Dynamic fiat pairs from config
                 const fiatRows = fiatRates.map((pair, i) => {
@@ -1683,7 +1684,7 @@ export default function App() {
                   ...fiatRows,
                   { key: "btc-usd",    label: "BTC / USD",       value: btcUsd     != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",   color: "#f59e0b" },
                   { key: "btc-gold",   label: "BTC / GOLD",      value: btcGold    != null ? btcGold.toFixed(2) + " oz"  : "—", chartId: "BTC_GOLD",  color: "#fb923c" },
-                  { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacSats != null ? bigMacSats.toLocaleString("sv-SE") + " sats" : "—", chartId: "BIGMAC_SATS", color: "#22d3a5" },
+                  { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacBits != null ? bigMacBits.toFixed(2) + " bits" : "—", chartId: "BIGMAC_SATS", color: "#22d3a5" },
                 ];
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
