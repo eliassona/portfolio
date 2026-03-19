@@ -1443,7 +1443,7 @@ export default function App() {
           <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub="Assets minus debt" accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
           <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " today"} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
-          <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities`} accent="#f87171" />
+          <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate) > 0 ? ((totalDebt / (totalValue + totalRealEstate)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
         </div>
 
         <div className="main-grid">
