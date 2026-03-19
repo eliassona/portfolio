@@ -646,12 +646,31 @@ export default function App() {
   }, []);
 
   // Track which symbols we've already alerted on today so we don't spam
-  const alertedToday = useRef(new Set());
+  // alertedToday persisted in localStorage so page reloads don't re-trigger alerts
+  const alertedToday = useRef((() => {
+    try {
+      const stored = JSON.parse(localStorage.getItem("alertedToday") ?? "{}");
+      const today  = new Date().toISOString().slice(0, 10);
+      if (stored.date === today && Array.isArray(stored.keys)) return new Set(stored.keys);
+    } catch { /* ignore */ }
+    return new Set();
+  })());
+
+  const persistAlerted = (set) => {
+    try {
+      const today = new Date().toISOString().slice(0, 10);
+      localStorage.setItem("alertedToday", JSON.stringify({ date: today, keys: [...set] }));
+    } catch { /* ignore */ }
+  };
+
   useEffect(() => {
     // Reset alerted set at midnight
-    const now   = new Date();
+    const now = new Date();
     const msUntilMidnight = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1) - now;
-    const id = setTimeout(() => { alertedToday.current = new Set(); }, msUntilMidnight);
+    const id = setTimeout(() => {
+      alertedToday.current = new Set();
+      try { localStorage.removeItem("alertedToday"); } catch { /* ignore */ }
+    }, msUntilMidnight);
     return () => clearTimeout(id);
   }, []);
 
@@ -952,6 +971,7 @@ export default function App() {
       if (alertCandidatesWithKeys.length > 0) {
         // Mark as alerted immediately before the fetch to prevent duplicate sends on slow refreshes
         alertCandidatesWithKeys.forEach(a => alertedToday.current.add(a.key));
+        persistAlerted(alertedToday.current);
         try {
           await fetch(`${ALERT_SERVER}/api/alert`, {
             method: 'POST',
@@ -961,6 +981,7 @@ export default function App() {
         } catch (err) {
           // Unmark on failure so it retries next refresh
           alertCandidatesWithKeys.forEach(a => alertedToday.current.delete(a.key));
+          persistAlerted(alertedToday.current);
           console.warn('Alert server unreachable:', err.message);
         }
       }
