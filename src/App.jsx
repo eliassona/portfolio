@@ -12,6 +12,7 @@ const INDEXES = [
   { symbol: "^DJI",    name: "Dow Jones",      group: "US" },
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
+  { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
   { symbol: "^OMX",    name: "OMX Stockholm",  group: "Nordic" },
   { symbol: "^OMXC25", name: "OMX Copenhagen", group: "Nordic" },
   { symbol: "^FTSE",   name: "FTSE 100",       group: "Europe" },
@@ -1261,11 +1262,9 @@ export default function App() {
               <div style={{ padding: "8px 24px 4px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151" }}>{group}</div>
               {items.map(idx => {
                 const isPos = (idx.change ?? 0) >= 0;
-                const needsSEK = idx.currency === "USD" || idx.currency == null;
+                const isYield = idx.symbol === "^TNX";
                 const displayVal = idx.value != null
-                  ? (needsSEK
-                      ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value)
-                      : new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value))
+                  ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value) + (isYield ? "%" : "")
                   : "—";
                 return (
                   <div key={idx.symbol} className="row-hover" onClick={() => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: "pointer" }}>
