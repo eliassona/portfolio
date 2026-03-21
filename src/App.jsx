@@ -19,6 +19,7 @@ const INDEXES = [
   { symbol: "^GDAXI",  name: "DAX",            group: "Europe" },
   { symbol: "GC=F",    name: "Gold",           group: "Commodities" },
   { symbol: "CL=F",    name: "Oil (WTI)",      group: "Commodities" },
+  { symbol: "BZ=F",    name: "Oil (Brent)",    group: "Commodities" },
   { symbol: "SI=F",    name: "Silver",         group: "Commodities" },
 ];
 
