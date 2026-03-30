@@ -606,7 +606,7 @@ function IndexChartModal({ index, onClose }) {
 
 export default function App() {
   const holdings = holdingsData
-    .filter(h => h.type !== "realestate" && h.type !== "debt")
+    .filter(h => h.type !== "realestate" && h.type !== "debt" && h.type !== "manual")
     .map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
   const [prices, setPrices]           = useState({});
@@ -1111,15 +1111,17 @@ export default function App() {
   const forexRows      = enriched.filter(h => h.type === "forex");
   const realEstateRows = holdingsData.filter(h => h.type === "realestate").map((h, i) => ({ ...h, id: `re-${i}`, color: COLORS[(enriched.length + i) % COLORS.length] }));
   const debtRows       = holdingsData.filter(h => h.type === "debt").map((h, i) => ({ ...h, id: `debt-${i}`, color: "#f87171" }));
+  const manualRows     = holdingsData.filter(h => h.type === "manual").map((h, i) => ({ ...h, id: `manual-${i}`, color: COLORS[(enriched.length + realEstateRows.length + i) % COLORS.length] }));
 
   const totalRealEstate = realEstateRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
   const totalDebt       = debtRows.reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
-  const netWorth        = totalValue + totalRealEstate - totalDebt;
+  const totalManual     = manualRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+  const netWorth        = totalValue + totalRealEstate + totalManual - totalDebt;
 
   // ── Allocation: grouped by category, with positions inside each ─────────────
   // Use costSEK as fallback when live prices haven't loaded yet
   const investedValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0);
-  const allocationTotal = investedValue + totalRealEstate;
+  const allocationTotal = investedValue + totalRealEstate + totalManual;
 
   const categoryGroups = (() => {
     const cats = new Map();
@@ -1139,6 +1141,10 @@ export default function App() {
     }
     for (const h of realEstateRows) {
       addToCategory("Real Estate", h.name, h.valueSEK ?? 0, h.color);
+    }
+    for (const h of manualRows) {
+      const cat = h.category ?? "Other";
+      if ((h.valueSEK ?? 0) > 0) addToCategory(cat, h.name, h.valueSEK, h.color);
     }
     // Sort positions within each category by value
     for (const g of cats.values()) g.positions.sort((a, b) => b.valueSEK - a.valueSEK);
@@ -1241,6 +1247,42 @@ export default function App() {
     </div>
   );
 
+
+  // ── Manual assets table ───────────────────────────────────────────────────
+  const ManualTable = ({ rows }) => (
+    <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
+      <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Other Assets</h2>
+        <span style={{ fontSize: 10, color: "#374151" }}>{fmtSEK(totalManual)} total</span>
+      </div>
+      <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 400 }}>
+        <thead>
+          <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+            {["Name", "Account", "Est. Value", "Notes"].map(col => (
+              <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {rows.map(h => (
+            <tr key={h.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+              <td style={{ padding: "12px 14px" }}>
+                <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                  <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, flexShrink: 0 }}>📦</div>
+                  <div style={{ fontWeight: 600, fontSize: 12 }}>{h.name}</div>
+                </div>
+              </td>
+              <td style={{ padding: "12px 14px" }}>
+                {h.account ? <span style={{ fontSize: 10, color: "#6b7280", background: "rgba(255,255,255,0.06)", padding: "2px 7px", borderRadius: 5 }}>{h.account}</span> : <span style={{ color: "#374151", fontSize: 11 }}>—</span>}
+              </td>
+              <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, fontWeight: 600 }}>{fmtSEK(h.valueSEK)}</td>
+              <td style={{ padding: "12px 14px", fontSize: 11, color: "#6b7280" }}>{h.notes ?? "—"}</td>
+            </tr>
+          ))}
+        </tbody>
+      </table></div>
+    </div>
+  );
 
   // ── Indexes table ─────────────────────────────────────────────────────────
   const IndexesTable = () => {
@@ -1474,6 +1516,7 @@ export default function App() {
             {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Cash" sourceLabel="via Frankfurter" showSparkline={false} />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
+            {manualRows.length     > 0 && <ManualTable rows={manualRows} />}
             <IndexesTable />
           </div>
 

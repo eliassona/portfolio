@@ -130,6 +130,16 @@ Default category mapping: `stock` → Stocks, `crypto` → Crypto, `forex` → C
   "balanceSEK": 1900000, "interestRate": 3.45, "notes": "Rörlig ränta" }
 ```
 
+### Manual / Other assets
+For anything that has a value but no live price feed — private equity, collectibles, loans receivable, pension accounts, etc. You set the value manually in `holdings.json` and update it whenever you like.
+
+```json
+{ "type": "manual", "name": "Private equity fund", "valueSEK": 500000,
+  "account": "Privat", "category": "Other", "notes": "Estimated NAV" }
+```
+
+Fields: `name` and `valueSEK` are required. `account`, `notes`, and `category` are optional. The `category` field controls which allocation bucket the asset falls into (defaults to "Other").
+
 ## Running on Raspberry Pi
 Install Node.js 20 via NodeSource:
 ```bash
