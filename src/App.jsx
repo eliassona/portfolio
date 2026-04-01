@@ -90,10 +90,24 @@ function MetricCard({ label, value, sub, accent, loading }) {
 }
 
 
+// ── Simple moving average helper ─────────────────────────────────────────────
+function calcMA(data, period) {
+  const out = [];
+  for (let i = period - 1; i < data.length; i++) {
+    let sum = 0;
+    for (let j = i - period + 1; j <= i; j++) sum += data[j].v;
+    out.push({ t: data[i].t, v: sum / period });
+  }
+  return out;
+}
+
 // ── Chart modal (standalone component — avoids re-render flicker from parent) ──
 function ChartModal({ holding, onClose, usdSekRate, prices }) {
   const [tf, setTf]               = useState(holding.type === "forex" ? "1W" : "1M");
   const [chartData, setChartData] = useState(null);
+  const [maData, setMaData]       = useState(null);
+  const [maLoading, setMaLoading] = useState(false);
+  const [showMA, setShowMA]       = useState(true);
   const [loading, setLoading]     = useState(false);
   const [error, setError]         = useState(null);
   const cache   = useRef({});
@@ -180,6 +194,47 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
     }
   }, [priceKey, type, sym]); // eslint-disable-line
 
+  // Fetch MA data on demand — only called when user enables MA toggle
+  const fetchMA = useCallback(async () => {
+    if (type !== "stock" && type !== "crypto") return;
+    const maCacheKey = `${priceKey}-ma`;
+    if (cache.current[maCacheKey]) { setMaData(cache.current[maCacheKey]); return; }
+    setMaLoading(true);
+    try {
+      let daily = [], weekly = [];
+      if (type === "stock") {
+        const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+        const [dRes, wRes] = await Promise.all([
+          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=2y&interval=1d`),
+          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=max&interval=1wk`),
+        ]);
+        const parse = async r => {
+          const j = await r.json();
+          const res = j?.chart?.result?.[0];
+          const ts = res?.timestamp ?? [], cs = res?.indicators?.quote?.[0]?.close ?? [];
+          return ts.map((t, i) => cs[i] != null ? { t: t * 1000, v: cs[i] * rateRef.current } : null).filter(Boolean);
+        };
+        [daily, weekly] = await Promise.all([parse(dRes), parse(wRes)]);
+      } else {
+        const id = COINGECKO_IDS[sym];
+        if (!id) return;
+        const res  = await fetch(`https://api.coingecko.com/api/v3/coins/${id}/market_chart?vs_currency=sek&days=max&interval=daily`);
+        const json = await res.json();
+        daily  = (json.prices ?? []).map(([t, v]) => ({ t, v }));
+        weekly = daily.filter((_, i) => i % 7 === 0);
+      }
+      const mas = { ma50d: calcMA(daily, 50), ma200d: calcMA(daily, 200), ma200w: calcMA(weekly, 200) };
+      cache.current[maCacheKey] = mas;
+      setMaData(mas);
+    } catch { /* silently ignore */ }
+    finally { setMaLoading(false); }
+  }, [priceKey, type, sym]); // eslint-disable-line
+
+  // Reset maData when timeframe changes so stale lines don't persist
+  useEffect(() => {
+    setMaData(cache.current[`${priceKey}-ma`] ?? null);
+  }, [tf, priceKey]);
+
   useEffect(() => { fetchChartData(tf); }, [tf]); // eslint-disable-line
 
   useEffect(() => {
@@ -209,21 +264,32 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
 
     const W = 520, H = 200, PAD = { t: 10, r: 10, b: 28, l: 62 };
     const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
-    const vals = chartData.map(d => d.v);
-    const minV = Math.min(...vals), maxV = Math.max(...vals);
+    const fmtDate = ts => new Date(ts).toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
+    const color   = chartData[chartData.length-1].v >= chartData[0].v ? "#22d3a5" : "#f87171";
+    const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
+    const tMin = chartData[0].t, tMax = chartData[chartData.length - 1].t;
+
+    // Clip MA lines to visible time range
+    const clip = arr => (arr ?? []).filter(d => d.t >= tMin && d.t <= tMax);
+    const vis50d  = showMA && maData ? clip(maData.ma50d)  : [];
+    const vis200d = showMA && maData ? clip(maData.ma200d) : [];
+    const vis200w = showMA && maData ? clip(maData.ma200w) : [];
+
+    // Y-scale includes all visible MA values so lines don't get clipped
+    const allVals = [...chartData.map(d => d.v), ...vis50d.map(d => d.v), ...vis200d.map(d => d.v), ...vis200w.map(d => d.v)];
+    const minV = Math.min(...allVals), maxV = Math.max(...allVals);
     const range = maxV - minV || 1;
-    const xi = i => PAD.l + (i / (chartData.length - 1)) * cW;
-    const yi = v => PAD.t + cH - ((v - minV) / range) * cH;
+
+    const xiT = t => PAD.l + ((t - tMin) / (tMax - tMin || 1)) * cW;
+    const yi  = v => PAD.t + cH - ((v - minV) / range) * cH;
+    const xi  = i => xiT(chartData[i].t);
     const pts     = chartData.map((d, i) => `${xi(i)},${yi(d.v)}`).join(" ");
     const fillPts = `${xi(0)},${PAD.t+cH} ${pts} ${xi(chartData.length-1)},${PAD.t+cH}`;
-    const color   = chartData[chartData.length-1].v >= chartData[0].v ? "#22d3a5" : "#f87171";
     const yTicks  = [0, 0.33, 0.67, 1].map(pct => ({ v: minV + pct*range, y: PAD.t+cH - pct*cH }));
     const xIdxs   = [0, Math.floor(chartData.length/3), Math.floor(2*chartData.length/3), chartData.length-1];
-    const fmtDate = ts => {
-      const d = new Date(ts);
-      return d.toLocaleDateString("sv-SE", { month: "short", day: "numeric" });
-    };
-    const changePct = ((chartData[chartData.length-1].v - chartData[0].v) / chartData[0].v) * 100;
+    const maLine  = (arr, stroke) => arr.length > 1
+      ? <polyline points={arr.map(d => `${xiT(d.t)},${yi(d.v)}`).join(" ")} fill="none" stroke={stroke} strokeWidth="1.2" opacity="0.9" strokeLinejoin="round" />
+      : null;
 
     return (
       <>
@@ -241,6 +307,9 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
           {yTicks.map((t, i) => <line key={i} x1={PAD.l} x2={W-PAD.r} y1={t.y} y2={t.y} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />)}
           <polygon points={fillPts} fill="url(#chartFill)" />
           <polyline points={pts} fill="none" stroke={color} strokeWidth="1.5" strokeLinejoin="round" />
+          {maLine(vis50d,  "#f59e0b")}
+          {maLine(vis200d, "#818cf8")}
+          {maLine(vis200w, "#f87171")}
           {yTicks.map((t, i) => (
             <text key={i} x={PAD.l-6} y={t.y+4} textAnchor="end" fontSize="9" fill="#4b5563">
               {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: t.v >= 1000 ? 0 : 2 }).format(t.v)}
@@ -250,6 +319,13 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
             <text key={i} x={xi(i)} y={H-6} textAnchor="middle" fontSize="9" fill="#4b5563">{fmtDate(chartData[i].t)}</text>
           ))}
         </svg>
+        {showMA && maData && (vis50d.length > 1 || vis200d.length > 1 || vis200w.length > 1) && (
+          <div style={{ display: "flex", gap: 14, marginTop: 8 }}>
+            {vis50d.length  > 1 && <span style={{ fontSize: 10, color: "#f59e0b", display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 14, height: 2, background: "#f59e0b", display: "inline-block", borderRadius: 1 }} />50D MA</span>}
+            {vis200d.length > 1 && <span style={{ fontSize: 10, color: "#818cf8", display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 14, height: 2, background: "#818cf8", display: "inline-block", borderRadius: 1 }} />200D MA</span>}
+            {vis200w.length > 1 && <span style={{ fontSize: 10, color: "#f87171", display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 14, height: 2, background: "#f87171", display: "inline-block", borderRadius: 1 }} />200W MA</span>}
+          </div>
+        )}
       </>
     );
   };
@@ -271,12 +347,18 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
             <button onClick={onClose} style={{ marginTop: 6, background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
           </div>
         </div>
-        <div style={{ display: "flex", gap: 6, marginBottom: 18 }}>
+        <div style={{ display: "flex", gap: 6, marginBottom: 18, alignItems: "center" }}>
           {timeframes.map(t => (
             <button key={t} onClick={() => setTf(t)} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer", background: tf === t ? "#22d3a5" : "rgba(255,255,255,0.06)", color: tf === t ? "#080c14" : "#6b7280", fontFamily: "'DM Sans',sans-serif", WebkitTapHighlightColor: "transparent" }}>
               {t}
             </button>
           ))}
+          {(type === "stock" || type === "crypto") && (
+            <button onClick={() => { if (!maData && !maLoading) fetchMA(); setShowMA(v => !v); }}
+              style={{ padding: "6px 10px", borderRadius: 8, border: "none", fontSize: 10, fontWeight: 600, cursor: "pointer", background: showMA ? "rgba(129,140,248,0.2)" : "rgba(255,255,255,0.06)", color: showMA ? "#818cf8" : "#6b7280", fontFamily: "'DM Sans',sans-serif", minWidth: 36 }}>
+              {maLoading ? "…" : "MA"}
+            </button>
+          )}
         </div>
         {renderChart()}
       </div>
