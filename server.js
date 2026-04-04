@@ -118,11 +118,26 @@ app.get('/api/yahoo', (req, res) => {
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
   res.json({
-    display:       config.display       ?? { currency: 'SEK' },
     bigMacSEK:     config.bigMacSEK     ?? 54,
     exchangeRates: config.exchangeRates ?? [],
     finnhubKey:    config.finnhubKey    ?? '',
   });
+});
+
+// Frankfurter proxy — avoids CORS issues from browser
+app.get('/api/frankfurter', (req, res) => {
+  const { path: fPath, ...params } = req.query;
+  const qs = Object.entries(params).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
+  const url = `https://api.frankfurter.app/${fPath ?? 'latest'}${qs ? '?' + qs : ''}`;
+  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (fRes) => {
+    let body = '';
+    fRes.on('data', chunk => { body += chunk; });
+    fRes.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(fRes.statusCode).send(body);
+    });
+  }).on('error', err => res.status(500).json({ error: err.message }));
 });
 
 // CoinGecko proxy — avoids CORS and rate limit issues from browser

@@ -25,8 +25,7 @@ const INDEXES = [
 
 // CoinGecko ID map — add coins here as needed
 const COINGECKO_IDS = {
-  BTC: "bitcoin", ETH: "ethereum", SOL: "solana",
-  BNB: "binancecoin", XRP: "ripple", ADA: "cardano", DOGE: "dogecoin",
+  BTC: "bitcoin",
 };
 
 // For each holding, what symbol should be shown in the UI?
@@ -175,7 +174,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else                          startDate = new Date(now - 365*86400000);
         const from = startDate.toISOString().slice(0,10);
         const to   = now.toISOString().slice(0,10);
-        const res  = await fetch(`https://api.frankfurter.app/${from}..${to}?from=${sym}&to=SEK`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(from + ".." + to)}&from=${sym}&to=SEK`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -402,7 +401,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
         else                          startDate = new Date(now - 365*86400000);
         const fromDate = startDate.toISOString().slice(0,10);
         const toDate   = now.toISOString().slice(0,10);
-        const res  = await fetch(`https://api.frankfurter.app/${fromDate}..${toDate}?from=${fromSym}&to=${toSym}`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(fromDate + ".." + toDate)}&from=${fromSym}&to=${toSym}`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -708,7 +707,6 @@ export default function App() {
   const [goldUsd, setGoldUsd]                 = useState(null);
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
-  const [displayCurrency, setDisplayCurrency] = useState("SEK"); // loaded from config.json
   const [finnhubKey, setFinnhubKey]           = useState("");    // loaded from config.json
   const finnhubKeyRef                         = useRef("");      // ref so fetchAll always has latest key
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
@@ -794,24 +792,32 @@ export default function App() {
     return res.json();
   };
 
-  const fetchCrypto = async (symbol) => {
-    const id = COINGECKO_IDS[symbol];
-    if (!id) return { priceSEK: null, priceUSD: null, change: null, historySEK: null };
-    // Sequential fetches with gap to stay within CoinGecko free tier (30 req/min)
-    let priceData = {}, historyData = {};
+  // Fetch all crypto prices in ONE request, then history per coin with delays
+  const fetchAllCrypto = async (symbols) => {
+    const entries = symbols.map(sym => ({ sym, id: COINGECKO_IDS[sym] })).filter(e => e.id);
+    if (!entries.length) return {};
+    const allIds = entries.map(e => e.id).join(",");
+    // Single price call for all coins
+    let priceData = {};
     try {
-      priceData = await cgFetch("simple/price", { ids: id, vs_currencies: "sek,usd", include_24hr_change: true });
+      priceData = await cgFetch("simple/price", { ids: allIds, vs_currencies: "sek,usd", include_24hr_change: true });
     } catch { /* price unavailable */ }
-    await new Promise(r => setTimeout(r, 2500));
-    try {
-      historyData = await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
-    } catch { /* history unavailable */ }
-    return {
-      priceSEK:   priceData?.[id]?.sek ?? null,
-      priceUSD:   priceData?.[id]?.usd ?? null,
-      change:     priceData?.[id]?.sek_24h_change ?? null,
-      historySEK: historyData?.prices ? historyData.prices.map(([, p]) => p) : null,
-    };
+    // History per coin sequentially with delay
+    const results = {};
+    for (const { sym, id } of entries) {
+      results[`crypto:${sym}`] = {
+        priceSEK:   priceData?.[id]?.sek ?? null,
+        priceUSD:   priceData?.[id]?.usd ?? null,
+        change:     priceData?.[id]?.sek_24h_change ?? null,
+        historySEK: null,
+      };
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const historyData = await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
+        if (historyData?.prices) results[`crypto:${sym}`].historySEK = historyData.prices.map(([, p]) => p);
+      } catch { /* history unavailable */ }
+    }
+    return results;
   };
 
   // ── Forex via Frankfurter ──────────────────────────────────────────────────
@@ -823,8 +829,8 @@ export default function App() {
       const from     = new Date(now - 30 * 86400000).toISOString().slice(0, 10);
       const to       = now.toISOString().slice(0, 10);
       const [latestRes, historyRes] = await Promise.all([
-        fetch(`https://api.frankfurter.app/latest?to=${allSyms}`),
-        fetch(`https://api.frankfurter.app/${from}..${to}?from=EUR&to=SEK`),
+        fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&to=${allSyms}`),
+        fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(from + ".." + to)}&from=EUR&to=SEK`),
       ]);
       const latest  = await latestRes.json();
       const history = await historyRes.json();
@@ -864,7 +870,7 @@ export default function App() {
     // Fallback today rate from Frankfurter
     if (today === 10.35) {
       try {
-        const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK");
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&from=USD&to=SEK`);
         const data = await res.json();
         today = data?.rates?.SEK ?? 10.35;
       } catch { /* use default */ }
@@ -872,7 +878,7 @@ export default function App() {
     // Yesterday: Frankfurter (ECB previous business day)
     let yesterday = today;
     try {
-      const res  = await fetch("https://api.frankfurter.app/latest?from=USD&to=SEK&amount=1");
+      const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&from=USD&to=SEK&amount=1`);
       const data = await res.json();
       // Frankfurter /latest returns the most recent ECB rate date — fetch one day before that
       const latestDate = data?.date;
@@ -880,7 +886,7 @@ export default function App() {
         const prev = new Date(latestDate);
         prev.setDate(prev.getDate() - 1);
         const prevStr = prev.toISOString().slice(0, 10);
-        const prevRes  = await fetch(`https://api.frankfurter.app/${prevStr}?from=USD&to=SEK`);
+        const prevRes  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(prevStr)}&from=USD&to=SEK`);
         const prevData = await prevRes.json();
         yesterday = prevData?.rates?.SEK ?? today;
       }
@@ -1007,14 +1013,13 @@ export default function App() {
         await new Promise(r => setTimeout(r, 250));
       }
 
-      for (const key of uniqueCryptoKeys) {
-        const sym = key.replace(/^crypto:/, "");
-        try {
-          results[key] = await fetchCrypto(sym);
-        } catch {
-          results[key] = { priceSEK: null, change: null, historySEK: null };
-        }
-        await new Promise(r => setTimeout(r, 3000)); // extra gap between holdings for CoinGecko rate limit
+      // Fetch all crypto in one batched price call + sequential history
+      const cryptoSyms = uniqueCryptoKeys.map(k => k.replace(/^crypto:/, ""));
+      try {
+        const cryptoResults = await fetchAllCrypto(cryptoSyms);
+        Object.assign(results, cryptoResults);
+      } catch {
+        uniqueCryptoKeys.forEach(key => { results[key] = { priceSEK: null, change: null, historySEK: null }; });
       }
 
       for (const key of uniqueForexKeys) {
@@ -1108,7 +1113,6 @@ export default function App() {
     fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/config`)
       .then(r => r.json())
       .then(cfg => {
-        if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency.toUpperCase());
         if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
         if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
         if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
@@ -1137,37 +1141,9 @@ export default function App() {
     };
   }, [fetchAll, lastFetched]);
 
-  // ── Display currency conversion ───────────────────────────────────────────
-  // All internal values are in SEK. Convert to displayCurrency for rendering.
-  const sekToDisplay = (() => {
-    if (displayCurrency === "SEK") return 1;
-    if (displayCurrency === "USD") return prices["forex:USD"]?.priceSEK ? 1 / prices["forex:USD"].priceSEK : null;
-    if (displayCurrency === "EUR") return prices["forex:EUR"]?.priceSEK ? 1 / prices["forex:EUR"].priceSEK : null;
-    if (displayCurrency === "JPY") return prices["forex:JPY"]?.priceSEK ? 1 / prices["forex:JPY"].priceSEK : null;
-    if (displayCurrency === "BTC") {
-      const btcSek = prices["crypto:BTC"]?.priceSEK;
-      return btcSek ? 1 / btcSek : null;
-    }
-    // Generic forex — try to find the rate
-    const fKey = `forex:${displayCurrency}`;
-    return prices[fKey]?.priceSEK ? 1 / prices[fKey].priceSEK : null;
-  })();
-
-  const convertSEK = n => (n == null || sekToDisplay == null) ? null : n * sekToDisplay;
-
-  const fmtDisplay = (n, decimals = 0) => {
-    const v = convertSEK(n);
-    if (v == null) return "—";
-    if (displayCurrency === "BTC") {
-      // Show in sats or BTC depending on size
-      if (Math.abs(v) < 0.001) return (v * 1e8).toFixed(0) + " sats";
-      return v.toFixed(6) + " ₿";
-    }
-    return new Intl.NumberFormat("sv-SE", { style: "currency", currency: displayCurrency, maximumFractionDigits: decimals }).format(v);
-  };
-
-  const fmtSEK     = n => fmtDisplay(n, 0);
-  const fmtSEKFull = n => fmtDisplay(n, 2);
+  // All values in SEK — simple formatters, no conversion needed
+  const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
+  const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 
   // ── Enrich each holding with live price data ───────────────────────────────
@@ -1587,7 +1563,7 @@ export default function App() {
           </div>
           <span className="header-title" style={{ fontWeight: 700, fontSize: 16, letterSpacing: "-0.02em" }}>Portfolio</span>
           {fetchStatus === "done"    && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(34,211,165,0.12)",  color: "#22d3a5", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Live</span>}
-          {displayCurrency !== "SEK" && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(245,158,11,0.15)", color: "#f59e0b", padding: "2px 8px", borderRadius: 20 }}>{displayCurrency}</span>}
+
           {fetchStatus === "loading" && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(99,102,241,0.12)",  color: "#a5b4fc", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Fetching…</span>}
           {fetchStatus === "error"   && <span style={{ fontSize: 10, fontWeight: 600, letterSpacing: "0.1em", background: "rgba(248,113,113,0.12)", color: "#f87171", padding: "2px 8px", borderRadius: 20, textTransform: "uppercase" }}>Error</span>}
         </div>
@@ -1874,7 +1850,7 @@ export default function App() {
             <div style={{ background: "rgba(34,211,165,0.05)", border: "1px solid rgba(34,211,165,0.15)", borderRadius: 12, padding: "12px 16px" }}>
               <p style={{ margin: 0, fontSize: 10, color: "#22d3a5", lineHeight: 1.8 }}>
                 ⚡ Stocks: Finnhub · Crypto: CoinGecko · Forex: Frankfurter<br/>
-                All values in {displayCurrency}. Edit <strong>holdings.json</strong> to update positions.
+                All values in SEK. Edit <strong>holdings.json</strong> to update positions.
               </p>
             </div>
           </div>
