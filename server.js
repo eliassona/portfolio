@@ -125,6 +125,28 @@ app.get('/api/config', (req, res) => {
   });
 });
 
+// CoinGecko proxy — avoids CORS and rate limit issues from browser
+app.get('/api/coingecko', (req, res) => {
+  const path = req.query.path;
+  if (!path) return res.status(400).json({ error: 'path required' });
+  const qs = Object.entries(req.query)
+    .filter(([k]) => k !== 'path')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+  const url = `https://api.coingecko.com/api/v3/${path}${qs ? '?' + qs : ''}`;
+  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (cgRes) => {
+    let body = '';
+    cgRes.on('data', chunk => { body += chunk; });
+    cgRes.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(cgRes.statusCode).send(body);
+    });
+  }).on('error', err => {
+    res.status(500).json({ error: err.message });
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`Alert server running on http://localhost:${PORT}`);
 });
