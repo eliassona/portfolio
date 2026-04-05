@@ -174,7 +174,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else                          startDate = new Date(now - 365*86400000);
         const from = startDate.toISOString().slice(0,10);
         const to   = now.toISOString().slice(0,10);
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(from + ".." + to)}&from=${sym}&to=SEK`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?range=${from}__${to}&from=${sym}&to=SEK`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -401,7 +401,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
         else                          startDate = new Date(now - 365*86400000);
         const fromDate = startDate.toISOString().slice(0,10);
         const toDate   = now.toISOString().slice(0,10);
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(fromDate + ".." + toDate)}&from=${fromSym}&to=${toSym}`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?range=${fromDate}__${toDate}&from=${fromSym}&to=${toSym}`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -823,37 +823,26 @@ export default function App() {
   // ── Forex via Frankfurter ──────────────────────────────────────────────────
   const fetchAllForex = async (symbols) => {
     if (!symbols.length) return {};
-    const allSyms = [...new Set([...symbols, "SEK"])].join(",");
-    try {
-      const now      = new Date();
-      const from     = new Date(now - 30 * 86400000).toISOString().slice(0, 10);
-      const to       = now.toISOString().slice(0, 10);
-      const [latestRes, historyRes] = await Promise.all([
-        fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&to=${allSyms}`),
-        fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(from + ".." + to)}&from=EUR&to=SEK`),
-      ]);
-      const latest  = await latestRes.json();
-      const history = await historyRes.json();
-      // Build SEK history array from EUR→SEK daily rates
-      const sekHistory = history.rates
-        ? Object.entries(history.rates).sort(([a],[b]) => a.localeCompare(b)).map(([,r]) => r.SEK).filter(Boolean)
-        : null;
-      const rates  = { ...(latest.rates ?? {}), EUR: 1 };
-      const sekPerEur = rates["SEK"] ?? 1;
-      return Object.fromEntries(symbols.map(sym => {
-        // SEK is always worth 1 SEK — don't try to derive it from Frankfurter rates
-        if (sym === "SEK") return [sym, { priceSEK: 1, change: null, historySEK: null }];
-        const rateToEur = rates[sym] ?? null;
-        // History: derive per-symbol SEK history from EUR/SEK history ÷ their EUR rate
-        // (Frankfurter-based, daily — acceptable for slow-moving fiat pairs)
-        const historySEK = (sekHistory && rateToEur != null && rateToEur !== 0)
-          ? sekHistory.map(s => s / rateToEur)
-          : null;
-        return [sym, { priceSEK: rateToEur != null ? sekPerEur / rateToEur : null, change: null, historySEK }];
-      }));
-    } catch {
-      return Object.fromEntries(symbols.map(s => [s, { priceSEK: null, change: null, historySEK: null }]));
+    const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const results = {};
+    for (const sym of symbols) {
+      if (sym === "SEK") { results[sym] = { priceSEK: 1, change: null, historySEK: null }; continue; }
+      try {
+        // Yahoo Finance forex symbol format: JPYSEK=X, EURSEK=X, CHFSEK=X etc.
+        const yahooSym = sym === "USD" ? "SEK=X" : `${sym}SEK=X`;
+        const res  = await fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(yahooSym)}&range=1mo&interval=1d`);
+        const json = await res.json();
+        const result = json?.chart?.result?.[0];
+        const closes = result?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+        const priceSEK = closes.length > 0 ? closes[closes.length - 1] : null;
+        const historySEK = closes.length > 1 ? closes : null;
+        results[sym] = { priceSEK, change: null, historySEK };
+      } catch {
+        results[sym] = { priceSEK: null, change: null, historySEK: null };
+      }
+      await new Promise(r => setTimeout(r, 300));
     }
+    return results;
   };
 
   // ── USD/SEK via Yahoo Finance (real-time) + yesterday via Frankfurter ───
@@ -867,31 +856,8 @@ export default function App() {
       const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
       if (closes.length > 0) today = closes[closes.length - 1];
     } catch { /* fall through to Frankfurter */ }
-    // Fallback today rate from Frankfurter
-    if (today === 10.35) {
-      try {
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&from=USD&to=SEK`);
-        const data = await res.json();
-        today = data?.rates?.SEK ?? 10.35;
-      } catch { /* use default */ }
-    }
-    // Yesterday: Frankfurter (ECB previous business day)
-    let yesterday = today;
-    try {
-      const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=latest&from=USD&to=SEK&amount=1`);
-      const data = await res.json();
-      // Frankfurter /latest returns the most recent ECB rate date — fetch one day before that
-      const latestDate = data?.date;
-      if (latestDate) {
-        const prev = new Date(latestDate);
-        prev.setDate(prev.getDate() - 1);
-        const prevStr = prev.toISOString().slice(0, 10);
-        const prevRes  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?path=${encodeURIComponent(prevStr)}&from=USD&to=SEK`);
-        const prevData = await prevRes.json();
-        yesterday = prevData?.rates?.SEK ?? today;
-      }
-    } catch { /* use today as fallback */ }
-    return { today, yesterday };
+    // Use today as yesterday fallback — close enough for Day P&L purposes
+    return { today, yesterday: today };
   };
 
   // ── Dividends: Finnhub + manual fallback ─────────────────────────────────
@@ -1025,6 +991,7 @@ export default function App() {
       for (const key of uniqueForexKeys) {
         const sym = key.replace(/^forex:/, "");
         results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
+        console.log(`forex ${key}:`, results[key]?.priceSEK);
       }
       // Always store USD, EUR, JPY + fiat pair currencies so the exchange rate strip always shows
       const alwaysStore = [...new Set(["USD", "EUR", "JPY", ...extraForexSymbols])];

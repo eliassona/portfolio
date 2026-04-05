@@ -126,9 +126,12 @@ app.get('/api/config', (req, res) => {
 
 // Frankfurter proxy — avoids CORS issues from browser
 app.get('/api/frankfurter', (req, res) => {
-  const { path: fPath, ...params } = req.query;
-  const qs = Object.entries(params).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join('&');
-  const url = `https://api.frankfurter.app/${fPath ?? 'latest'}${qs ? '?' + qs : ''}`;
+  // "endpoint" = latest/currencies, "range" = date range like 2026-01-01..2026-04-04
+  const { endpoint, range, path: _path, ...params } = req.query;
+  const fPath = (range ?? endpoint ?? 'latest').replace(/__/g, '..');
+  const qs = Object.entries(params).map(([k,v]) => `${k}=${v}`).join('&');
+  const url = `https://api.frankfurter.app/${fPath}${qs ? '?' + qs : ''}`;
+  console.log('Frankfurter URL:', url);
   const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
   https.get(url, options, (fRes) => {
     let body = '';
