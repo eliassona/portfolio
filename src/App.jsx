@@ -1791,7 +1791,7 @@ export default function App() {
                       return (
                         <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 10px" }}>
                           <div>
-                            <span style={{ fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{getDisplaySymbol(h)}</span>
+                            <span style={{ fontSize: 11, fontWeight: 600 }}>{h.name}</span>
                             {h.account && <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 6 }}>{h.account}</span>}
                           </div>
                           <span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(annualNet / 12)}/mo</span>
