@@ -165,6 +165,7 @@ app.get('/api/coingecko', (req, res) => {
   });
 });
 
+
 app.listen(PORT, () => {
   console.log(`Alert server running on http://localhost:${PORT}`);
 });

@@ -699,6 +699,7 @@ export default function App() {
   const [usdSekRate, setUsdSekRate]         = useState(10.35);
   const [prevUsdSekRate, setPrevUsdSekRate] = useState(10.35); // yesterday's rate for accurate Day P&L
   const [fetchStatus, setFetchStatus] = useState("idle");
+  const [missingPrices, setMissingPrices] = useState(0);
   const [lastFetched, setLastFetched] = useState(null);
   const [animated, setAnimated]       = useState(false);
   const [countdown, setCountdown]     = useState(REFRESH_MS / 1000);
@@ -1003,6 +1004,13 @@ export default function App() {
       }
       // Patch USD price with the real-time Yahoo rate (Frankfurter is ECB, updated once/day)
       if (results["forex:USD"]) results["forex:USD"].priceSEK = usdSek;
+
+      // Count holdings with missing prices for the warning indicator
+      const missingCount = holdings.filter(h => {
+        const key = getPriceKey(h);
+        return results[key]?.priceSEK == null;
+      }).length;
+      setMissingPrices(missingCount);
 
       setPrices(results);
 
@@ -1547,8 +1555,8 @@ export default function App() {
 
       <div className="page-inner">
         <div className={`metrics-grid fade-in ${animated ? "visible" : ""}`}>
-          <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub="Assets minus debt" accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
-          <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
+          <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : "Assets minus debt"} accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
+          <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " today"} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
           <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
         </div>
