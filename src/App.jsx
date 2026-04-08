@@ -1400,7 +1400,7 @@ export default function App() {
       <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 600 }}>
         <thead>
           <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
-            {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", ...(showSparkline ? ["30D"] : [])].map(col => (
+            {["Asset", "Account", "Amount", "Avg Cost", "Live Price", "Market Value", "Gain / Loss", ...(title === "Cash" ? ["Interest p.a."] : []), ...(showSparkline ? ["30D"] : [])].map(col => (
               <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
             ))}
           </tr>
@@ -1451,6 +1451,13 @@ export default function App() {
                       : <span style={{ fontSize: 11, color: "#374151" }}>—</span>
                   }
                 </td>
+                {title === "Cash" && (
+                  <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 11 }}>
+                    {h.interestRate != null
+                      ? <span style={{ color: "#22d3a5" }}>{h.interestRate.toFixed(2)}%</span>
+                      : <span style={{ color: "#374151" }}>—</span>}
+                  </td>
+                )}
                 {showSparkline && <td style={{ padding: "12px 14px" }}>
                   {h.historySEK ? <Sparkline data={h.historySEK} positive={isPos} /> : <div style={{ width: 80 }} />}
                 </td>}
@@ -1766,6 +1773,39 @@ export default function App() {
                 </div>
               )}
             </div>
+
+            {/* Cash Interest pane */}
+            {forexRows.some(h => h.interestRate != null) && (() => {
+              const monthlyNet = forexRows.reduce((s, h) => {
+                if (h.interestRate == null || h.valueSEK == null) return s;
+                const annualGross = h.valueSEK * (h.interestRate / 100);
+                const annualNet   = annualGross * 0.70; // 30% tax
+                return s + annualNet / 12;
+              }, 0);
+              return (
+                <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "205ms" }}>
+                  <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Cash Interest</h2>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {forexRows.filter(h => h.interestRate != null).map(h => {
+                      const annualNet = (h.valueSEK ?? 0) * (h.interestRate / 100) * 0.70;
+                      return (
+                        <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 10px" }}>
+                          <div>
+                            <span style={{ fontSize: 11, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{getDisplaySymbol(h)}</span>
+                            {h.account && <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 6 }}>{h.account}</span>}
+                          </div>
+                          <span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(annualNet / 12)}/mo</span>
+                        </div>
+                      );
+                    })}
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2 }}>
+                      <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>~ Monthly (after 30% tax)</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(monthlyNet)}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Exchange Rates pane — below Upcoming Dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "210ms" }}>
