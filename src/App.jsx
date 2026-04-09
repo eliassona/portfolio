@@ -1655,36 +1655,59 @@ export default function App() {
             </div>
 
             {/* Currency holdings — only if forex positions exist */}
-            {forexRows.length > 0 && (
-              <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Cash</h2>
-                  <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                  {Object.values(
-                    forexRows.reduce((acc, h) => {
-                      const key = h.symbol;
-                      if (!acc[key]) acc[key] = { symbol: key, name: h.name, totalShares: 0, valueSEK: 0, priceSEK: h.priceSEK, color: h.color };
-                      acc[key].totalShares += h.shares;
-                      acc[key].valueSEK   += h.valueSEK ?? 0;
-                      return acc;
-                    }, {})
-                  ).sort((a, b) => b.valueSEK - a.valueSEK).map(c => (
-                    <div key={c.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                      <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                        <div style={{ width: 24, height: 24, borderRadius: 6, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${c.color}22`, color: c.color }}>{c.symbol.slice(0,3)}</div>
-                        <div>
-                          <div style={{ fontSize: 11, fontWeight: 600 }}>{c.symbol}</div>
-                          <div style={{ fontSize: 9, color: "#4b5563" }}>{c.totalShares.toLocaleString("sv-SE")} units · {c.priceSEK != null ? fmtSEKFull(c.priceSEK) : "—"}/unit</div>
+            {forexRows.length > 0 && (() => {
+              const monthlyNetInterest = forexRows.reduce((s, h) => {
+                if (h.interestRate == null || h.valueSEK == null) return s;
+                return s + (h.valueSEK * (h.interestRate / 100) * 0.70) / 12;
+              }, 0);
+              // Group by symbol for balance display, keep interestRate per holding
+              const grouped = Object.values(
+                forexRows.reduce((acc, h) => {
+                  const key = h.symbol;
+                  if (!acc[key]) acc[key] = { symbol: key, name: h.name, totalShares: 0, valueSEK: 0, priceSEK: h.priceSEK, color: h.color, interestRate: h.interestRate };
+                  acc[key].totalShares += h.shares;
+                  acc[key].valueSEK   += h.valueSEK ?? 0;
+                  return acc;
+                }, {})
+              ).sort((a, b) => b.valueSEK - a.valueSEK);
+              return (
+                <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+                    <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Cash</h2>
+                    <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
+                  </div>
+                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                    {grouped.map(c => {
+                      const monthlyNet = c.interestRate != null ? (c.valueSEK * (c.interestRate / 100) * 0.70) / 12 : null;
+                      return (
+                        <div key={c.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                          <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
+                            <div style={{ width: 24, height: 24, borderRadius: 6, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${c.color}22`, color: c.color }}>{c.symbol.slice(0,3)}</div>
+                            <div>
+                              <div style={{ fontSize: 11, fontWeight: 600 }}>{c.name}</div>
+                              <div style={{ fontSize: 9, color: "#4b5563" }}>
+                                {c.totalShares.toLocaleString("sv-SE")} units
+                                {c.interestRate != null && <span style={{ color: "#38bdf8", marginLeft: 4 }}>{c.interestRate.toFixed(2)}%</span>}
+                              </div>
+                            </div>
+                          </div>
+                          <div style={{ textAlign: "right" }}>
+                            <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(c.valueSEK)}</div>
+                            {monthlyNet != null && <div style={{ fontSize: 9, color: "#22d3a5", marginTop: 1 }}>{fmtSEK(monthlyNet)}/mo</div>}
+                          </div>
                         </div>
+                      );
+                    })}
+                    {monthlyNetInterest > 0 && (
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2 }}>
+                        <span style={{ fontSize: 10, color: "#6b7280" }}>~ Monthly interest (after 30% tax)</span>
+                        <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(monthlyNetInterest)}</span>
                       </div>
-                      <span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(c.valueSEK)}</span>
-                    </div>
-                  ))}
+                    )}
+                  </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
             {/* Upcoming dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
@@ -1773,39 +1796,6 @@ export default function App() {
                 </div>
               )}
             </div>
-
-            {/* Cash Interest pane */}
-            {forexRows.some(h => h.interestRate != null) && (() => {
-              const monthlyNet = forexRows.reduce((s, h) => {
-                if (h.interestRate == null || h.valueSEK == null) return s;
-                const annualGross = h.valueSEK * (h.interestRate / 100);
-                const annualNet   = annualGross * 0.70; // 30% tax
-                return s + annualNet / 12;
-              }, 0);
-              return (
-                <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "205ms" }}>
-                  <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Cash Interest</h2>
-                  <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {forexRows.filter(h => h.interestRate != null).map(h => {
-                      const annualNet = (h.valueSEK ?? 0) * (h.interestRate / 100) * 0.70;
-                      return (
-                        <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 8, padding: "6px 10px" }}>
-                          <div>
-                            <span style={{ fontSize: 11, fontWeight: 600 }}>{h.name}</span>
-                            {h.account && <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 6 }}>{h.account}</span>}
-                          </div>
-                          <span style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(annualNet / 12)}/mo</span>
-                        </div>
-                      );
-                    })}
-                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", borderTop: "1px solid rgba(255,255,255,0.07)", paddingTop: 8, marginTop: 2 }}>
-                      <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>~ Monthly (after 30% tax)</span>
-                      <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(monthlyNet)}</span>
-                    </div>
-                  </div>
-                </div>
-              );
-            })()}
 
             {/* Exchange Rates pane — below Upcoming Dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "210ms" }}>
