@@ -1660,16 +1660,6 @@ export default function App() {
                 if (h.interestRate == null || h.valueSEK == null) return s;
                 return s + (h.valueSEK * (h.interestRate / 100) * 0.70) / 12;
               }, 0);
-              // Group by symbol for balance display, keep interestRate per holding
-              const grouped = Object.values(
-                forexRows.reduce((acc, h) => {
-                  const key = h.symbol;
-                  if (!acc[key]) acc[key] = { symbol: key, name: h.name, totalShares: 0, valueSEK: 0, priceSEK: h.priceSEK, color: h.color, interestRate: h.interestRate };
-                  acc[key].totalShares += h.shares;
-                  acc[key].valueSEK   += h.valueSEK ?? 0;
-                  return acc;
-                }, {})
-              ).sort((a, b) => b.valueSEK - a.valueSEK);
               return (
                 <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "180ms" }}>
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
@@ -1677,22 +1667,22 @@ export default function App() {
                     <span style={{ fontSize: 11, fontFamily: "'DM Mono',monospace", color: "#22d3a5", fontWeight: 600 }}>{fmtSEK(forexRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0))}</span>
                   </div>
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {grouped.map(c => {
-                      const monthlyNet = c.interestRate != null ? (c.valueSEK * (c.interestRate / 100) * 0.70) / 12 : null;
+                    {[...forexRows].sort((a, b) => (b.valueSEK ?? 0) - (a.valueSEK ?? 0)).map(h => {
+                      const monthlyNet = h.interestRate != null ? ((h.valueSEK ?? 0) * (h.interestRate / 100) * 0.70) / 12 : null;
                       return (
-                        <div key={c.symbol} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div key={h.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                           <div style={{ display: "flex", alignItems: "center", gap: 7 }}>
-                            <div style={{ width: 24, height: 24, borderRadius: 6, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${c.color}22`, color: c.color }}>{c.symbol.slice(0,3)}</div>
+                            <div style={{ width: 24, height: 24, borderRadius: 6, fontSize: 9, fontWeight: 700, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, color: h.color }}>{h.symbol.slice(0,3)}</div>
                             <div>
-                              <div style={{ fontSize: 11, fontWeight: 600 }}>{c.name}</div>
+                              <div style={{ fontSize: 11, fontWeight: 600 }}>{h.name}</div>
                               <div style={{ fontSize: 9, color: "#4b5563" }}>
-                                {c.totalShares.toLocaleString("sv-SE")} units
-                                {c.interestRate != null && <span style={{ color: "#38bdf8", marginLeft: 4 }}>{c.interestRate.toFixed(2)}%</span>}
+                                {h.shares.toLocaleString("sv-SE")} units
+                                {h.interestRate != null && <span style={{ color: "#38bdf8", marginLeft: 4 }}>{h.interestRate.toFixed(2)}%</span>}
                               </div>
                             </div>
                           </div>
                           <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(c.valueSEK)}</div>
+                            <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(h.valueSEK)}</div>
                             {monthlyNet != null && <div style={{ fontSize: 9, color: "#22d3a5", marginTop: 1 }}>{fmtSEK(monthlyNet)}/mo</div>}
                           </div>
                         </div>
