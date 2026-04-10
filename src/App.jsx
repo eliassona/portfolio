@@ -142,16 +142,40 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else if (timeframe === "YTD") { range = "ytd"; interval = "1d";  }
         else if (timeframe === "1Y")  { range = "1y";  interval = "1wk"; }
         else                          { range = "5y";  interval = "1wk"; }
-        const url  = `${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`;
-        const res  = await fetch(url);
+        const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+        // Fetch stock prices and historical USD/SEK in parallel for accurate point-by-point conversion
+        const [res, fxRes] = await Promise.all([
+          fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`),
+          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=${range}&interval=${interval}`),
+        ]);
         const json = await res.json();
         const result = json?.chart?.result?.[0];
         const timestamps = result?.timestamp;
         const closes     = result?.indicators?.quote?.[0]?.close;
+
+        // Build a date→rate map from historical FX data; fall back to spot rate for missing dates
+        const fxRateMap = {};
+        try {
+          const fxJson   = await fxRes.json();
+          const fxResult = fxJson?.chart?.result?.[0];
+          const fxTs     = fxResult?.timestamp ?? [];
+          const fxClose  = fxResult?.indicators?.quote?.[0]?.close ?? [];
+          fxTs.forEach((t, i) => {
+            if (fxClose[i] != null) {
+              fxRateMap[new Date(t * 1000).toISOString().slice(0, 10)] = fxClose[i];
+            }
+          });
+        } catch { /* ignore — will fall back to spot rate */ }
+
         if (timestamps?.length && closes?.length) {
           data = timestamps
-            .map((t, i) => ({ t: t * 1000, v: closes[i] == null ? null : closes[i] * rateRef.current }))
-            .filter(d => d.v != null);
+            .map((t, i) => {
+              if (closes[i] == null) return null;
+              const dateStr = new Date(t * 1000).toISOString().slice(0, 10);
+              const fxRate  = fxRateMap[dateStr] ?? rateRef.current;
+              return { t: t * 1000, v: closes[i] * fxRate };
+            })
+            .filter(d => d != null);
         }
       } else if (type === "crypto") {
         const id = COINGECKO_IDS[sym];
@@ -204,17 +228,39 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
       let daily = [], weekly = [];
       if (type === "stock") {
         const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
-        const [dRes, wRes] = await Promise.all([
+        const [dRes, wRes, fxDRes, fxWRes] = await Promise.all([
           fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=2y&interval=1d`),
           fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=max&interval=1wk`),
+          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=2y&interval=1d`),
+          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=max&interval=1wk`),
         ]);
-        const parse = async r => {
+        // Build date→FX rate maps for daily and weekly
+        const buildFxMap = async fxRes => {
+          const fxMap = {};
+          try {
+            const fxJson   = await fxRes.json();
+            const fxResult = fxJson?.chart?.result?.[0];
+            const fxTs     = fxResult?.timestamp ?? [];
+            const fxClose  = fxResult?.indicators?.quote?.[0]?.close ?? [];
+            fxTs.forEach((t, i) => {
+              if (fxClose[i] != null) fxMap[new Date(t * 1000).toISOString().slice(0, 10)] = fxClose[i];
+            });
+          } catch { /* fall back to spot rate */ }
+          return fxMap;
+        };
+        const [fxDMap, fxWMap] = await Promise.all([buildFxMap(fxDRes), buildFxMap(fxWRes)]);
+        const parse = async (r, fxMap) => {
           const j = await r.json();
           const res = j?.chart?.result?.[0];
           const ts = res?.timestamp ?? [], cs = res?.indicators?.quote?.[0]?.close ?? [];
-          return ts.map((t, i) => cs[i] != null ? { t: t * 1000, v: cs[i] * rateRef.current } : null).filter(Boolean);
+          return ts.map((t, i) => {
+            if (cs[i] == null) return null;
+            const dateStr = new Date(t * 1000).toISOString().slice(0, 10);
+            const fxRate  = fxMap[dateStr] ?? rateRef.current;
+            return { t: t * 1000, v: cs[i] * fxRate };
+          }).filter(Boolean);
         };
-        [daily, weekly] = await Promise.all([parse(dRes), parse(wRes)]);
+        [daily, weekly] = await Promise.all([parse(dRes, fxDMap), parse(wRes, fxWMap)]);
       } else {
         const id = COINGECKO_IDS[sym];
         if (!id) return;
