@@ -21,6 +21,7 @@ const INDEXES = [
   { symbol: "CL=F",    name: "Oil (WTI)",      group: "Commodities" },
   { symbol: "BZ=F",    name: "Oil (Brent)",    group: "Commodities" },
   { symbol: "SI=F",    name: "Silver",         group: "Commodities" },
+  { symbol: "ELEC_SE3", name: "Electricity (SE3)", group: "Energy" },
 ];
 
 // CoinGecko ID map — add coins here as needed
@@ -1061,8 +1062,34 @@ export default function App() {
       setPrices(results);
 
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
+      // ELEC_SE3: fetch today's spot prices from elprisetjustnu.se (Nord Pool data, free, no auth),
+      // then add energy tax + network fee and apply 25% VAT to get the all-in consumer price.
+      //   Energy tax 2026: 0.36 SEK/kWh excl. VAT
+      //   Network fee (Ellevio SE3 avg): ~0.45 SEK/kWh excl. VAT
+      //   VAT: 25% on everything
+      const fetchElecPrice = async () => {
+        try {
+          const now = new Date();
+          const y = now.getFullYear();
+          const m = String(now.getMonth() + 1).padStart(2, "0");
+          const d = String(now.getDate()).padStart(2, "0");
+          const res  = await fetch(`${ALERT_SERVER}/api/elpriset?date=${y}/${m}-${d}&area=SE3`);
+          const data = await res.json();
+          if (!Array.isArray(data) || !data.length) return null;
+          const avgSpot = data.reduce((s, h) => s + (h.SEK_per_kWh ?? 0), 0) / data.length;
+          // Add fixed costs (excl. VAT), then apply 25% VAT to the total
+          const ENERGY_TAX = 0.36;   // SEK/kWh excl. VAT (2026 rate)
+          const NETWORK_FEE = 0.45;  // SEK/kWh excl. VAT (Ellevio SE3 avg)
+          const allInExVat = avgSpot + ENERGY_TAX + NETWORK_FEE;
+          return +(allInExVat * 1.25).toFixed(3); // incl. 25% VAT
+        } catch { return null; }
+      };
       const indexResults = await Promise.all(
         INDEXES.map(async idx => {
+          if (idx.symbol === "ELEC_SE3") {
+            const price = await fetchElecPrice();
+            return { ...idx, value: price, change: null, currency: "SEK/kWh", isStatic: price == null };
+          }
           try {
             const res  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(idx.symbol)}&range=5d&interval=1d`);
             const json = await res.json();
@@ -1404,25 +1431,29 @@ export default function App() {
               {items.map(idx => {
                 const isPos = (idx.change ?? 0) >= 0;
                 const isYield = idx.symbol === "^TNX";
+                const isElec  = idx.symbol === "ELEC_SE3";
                 const displayVal = idx.value != null
-                  ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 2 }).format(idx.value) + (isYield ? "%" : "")
+                  ? new Intl.NumberFormat("sv-SE", { minimumFractionDigits: isElec ? 2 : 0, maximumFractionDigits: 2 }).format(idx.value) + (isYield ? "%" : isElec ? " kr/kWh" : "")
                   : "—";
                 return (
-                  <div key={idx.symbol} className="row-hover" onClick={() => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: "pointer" }}>
+                  <div key={idx.symbol} className={isElec ? "" : "row-hover"} onClick={isElec ? undefined : () => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: isElec ? "default" : "pointer" }}>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{idx.name}</div>
-                      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{idx.symbol}</div>
+                      <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{isElec ? "SE3 · all-in incl. tax & grid" : idx.symbol}</div>
                     </div>
                     <div style={{ textAlign: "right" }}>
                       {isLoading && idx.value == null
                         ? <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />
                         : <>
                             <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace" }}>{displayVal}</div>
-                            {idx.change != null && (
-                              <div style={{ fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
-                                {isPos ? "+" : ""}{idx.change.toFixed(2)}%
-                              </div>
-                            )}
+                            {isElec
+                              ? <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>today's avg spot + tax + grid</div>
+                              : idx.change != null && (
+                                <div style={{ fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
+                                  {isPos ? "+" : ""}{idx.change.toFixed(2)}%
+                                </div>
+                              )
+                            }
                           </>
                       }
                     </div>

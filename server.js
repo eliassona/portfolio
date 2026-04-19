@@ -166,6 +166,26 @@ app.get('/api/coingecko', (req, res) => {
 });
 
 
+// Elprisetjustnu proxy — fetches Nord Pool spot prices for SE3 (or any area), no auth required
+// Usage: GET /api/elpriset?date=2026/04-19&area=SE3
+app.get('/api/elpriset', (req, res) => {
+  const { date, area = 'SE3' } = req.query;
+  if (!date) return res.status(400).json({ error: 'date required (YYYY/MM-DD)' });
+  const url = `https://www.elprisetjustnu.se/api/v1/prices/${date}_${area}.json`;
+  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (epRes) => {
+    let body = '';
+    epRes.on('data', chunk => { body += chunk; });
+    epRes.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(epRes.statusCode).send(body);
+    });
+  }).on('error', err => {
+    console.error('elpriset proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  });
+});
+
 app.listen(PORT, () => {
   console.log(`Alert server running on http://localhost:${PORT}`);
 });
