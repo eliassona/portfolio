@@ -166,22 +166,42 @@ app.get('/api/coingecko', (req, res) => {
 });
 
 
-// Elprisetjustnu proxy — fetches Nord Pool spot prices for SE3 (or any area), no auth required
-// Usage: GET /api/elpriset?date=2026/04-19&area=SE3
-app.get('/api/elpriset', (req, res) => {
-  const { date, area = 'SE3' } = req.query;
-  if (!date) return res.status(400).json({ error: 'date required (YYYY/MM-DD)' });
-  const url = `https://www.elprisetjustnu.se/api/v1/prices/${date}_${area}.json`;
-  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
-  https.get(url, options, (epRes) => {
+// Big Mac Index proxy — fetches the latest local SEK price for Sweden from The Economist's
+// official dataset on GitHub (updated ~twice a year, the authoritative source).
+// Returns: { local_price: <SEK>, date: <YYYY-MM-DD>, source: "TheEconomist/big-mac-data" }
+app.get('/api/bigmac', (req, res) => {
+  const url = 'https://raw.githubusercontent.com/TheEconomist/big-mac-data/master/source-data/big-mac-source-data.csv';
+  const options = { headers: { 'Accept': 'text/plain', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (ghRes) => {
     let body = '';
-    epRes.on('data', chunk => { body += chunk; });
-    epRes.on('end', () => {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(epRes.statusCode).send(body);
+    ghRes.on('data', chunk => { body += chunk; });
+    ghRes.on('end', () => {
+      try {
+        // Parse CSV — columns: name,iso_a3,currency_code,local_price,dollar_ex,gdp_dollar,date
+        const lines = body.trim().split('\n').filter(l => l.trim());
+        const header = lines[0].split(',');
+        const isoIdx   = header.indexOf('iso_a3');
+        const priceIdx = header.indexOf('local_price');
+        const dateIdx  = header.indexOf('date');
+        // Find the last SWE row (CSV is chronological, last = most recent)
+        let latest = null;
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i].split(',');
+          if (cols[isoIdx] === 'SWE') latest = cols;
+        }
+        if (!latest) return res.status(404).json({ error: 'Sweden not found in dataset' });
+        res.json({
+          local_price: parseFloat(latest[priceIdx]),
+          date: latest[dateIdx],
+          source: 'TheEconomist/big-mac-data',
+        });
+      } catch (err) {
+        console.error('bigmac parse error:', err.message);
+        res.status(500).json({ error: err.message });
+      }
     });
   }).on('error', err => {
-    console.error('elpriset proxy error:', err.message);
+    console.error('bigmac proxy error:', err.message);
     res.status(500).json({ error: err.message });
   });
 });

@@ -1156,19 +1156,31 @@ export default function App() {
     }
   }, []); // eslint-disable-line
 
-  // Load config first, then fetchAll so fiatRates is populated before forex symbols are resolved
+  // Load config first, then fetchAll so fiatRates is populated before forex symbols are resolved.
+  // Also fetch the live Big Mac price for Sweden from thebigmacindex.com in parallel.
   useEffect(() => {
-    fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/config`)
-      .then(r => r.json())
-      .then(cfg => {
-        if (cfg.bigMacSEK)        setBigMacSEK(cfg.bigMacSEK);
-        if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
-        if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
-        // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
-        const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
-        fetchAll(fiatSymbols);
-      })
-      .catch(() => { fetchAll([]); }); // config unreachable — fetch anyway with no extras
+    const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+    Promise.all([
+      fetch(`${srv}/api/config`).then(r => r.json()),
+      fetch(`${srv}/api/bigmac?country=se`).then(r => r.json()).catch(() => null),
+    ]).then(([cfg, bigmac]) => {
+      // Live Big Mac price — response shape: { country: { local_price, ... }, ... }
+      // The API returns either an object with a "se" key or an array; grab local_price in SEK.
+      // Response shape: { local_price: <SEK>, date: "YYYY-MM-DD", source: "TheEconomist/big-mac-data" }
+      const liveBigMac = (() => {
+        try {
+          const price = bigmac?.local_price;
+          return price != null && price > 0 ? price : null;
+        } catch { return null; }
+      })();
+      if (liveBigMac)           setBigMacSEK(liveBigMac);
+      else if (cfg.bigMacSEK)   setBigMacSEK(cfg.bigMacSEK); // fall back to config.json
+      if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
+      if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
+      // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
+      const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
+      fetchAll(fiatSymbols);
+    }).catch(() => { fetchAll([]); }); // both unreachable — fetch anyway with no extras
   }, []); // eslint-disable-line
 
   // Auto-refresh every 5 minutes — placed after fetchAll is defined.
