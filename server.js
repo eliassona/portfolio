@@ -206,6 +206,119 @@ app.get('/api/bigmac', (req, res) => {
   });
 });
 
+// Net Worth endpoint — replicates the frontend calculation server-side for the Apple Watch widget.
+// Fetches live prices for stocks (Yahoo), crypto (CoinGecko), and forex (Frankfurter),
+// then combines with static holdings.json values for real estate, manual assets, and debt.
+app.get('/api/networth', async (req, res) => {
+  try {
+    const config   = loadConfig();
+    const holdings = JSON.parse(readFileSync('./holdings.json', 'utf8'));
+
+    // ── 1. USD/SEK rate via Yahoo ──────────────────────────────────────────────
+    const usdSek = await new Promise((resolve) => {
+      const url = 'https://query2.finance.yahoo.com/v8/finance/chart/SEK%3DX?range=5d&interval=1d';
+      https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, r => {
+        let b = ''; r.on('data', c => b += c); r.on('end', () => {
+          try {
+            const closes = JSON.parse(b)?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+            resolve(closes.at(-1) ?? 10.5);
+          } catch { resolve(10.5); }
+        });
+      }).on('error', () => resolve(10.5));
+    });
+
+    // ── 2. Stock prices via Yahoo (deduplicated) ───────────────────────────────
+    const stockHoldings = holdings.filter(h => h.type === 'stock');
+    const uniqueStockSyms = [...new Set(stockHoldings.map(h => h.priceSymbol ?? h.symbol))];
+    const stockPrices = {}; // symbol → priceUSD
+    await Promise.all(uniqueStockSyms.map(sym => new Promise(resolve => {
+      const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=1d&interval=1d`;
+      https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, r => {
+        let b = ''; r.on('data', c => b += c); r.on('end', () => {
+          try {
+            const closes = JSON.parse(b)?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+            stockPrices[sym] = closes.at(-1) ?? null;
+          } catch { stockPrices[sym] = null; }
+          resolve();
+        });
+      }).on('error', () => { stockPrices[sym] = null; resolve(); });
+    })));
+
+    // ── 3. Crypto via CoinGecko (single request) ──────────────────────────────
+    const COINGECKO_IDS = { BTC: 'bitcoin' }; // extend as needed
+    const cryptoHoldings = holdings.filter(h => h.type === 'crypto');
+    const cryptoPrices = {}; // symbol → priceSEK
+    if (cryptoHoldings.length) {
+      const ids = [...new Set(cryptoHoldings.map(h => COINGECKO_IDS[h.priceSymbol ?? h.symbol]).filter(Boolean))].join(',');
+      if (ids) await new Promise(resolve => {
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=sek`;
+        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
+          let b = ''; r.on('data', c => b += c); r.on('end', () => {
+            try {
+              const data = JSON.parse(b);
+              for (const h of cryptoHoldings) {
+                const id = COINGECKO_IDS[h.priceSymbol ?? h.symbol];
+                if (id && data[id]?.sek) cryptoPrices[h.priceSymbol ?? h.symbol] = data[id].sek;
+              }
+            } catch { /* ignore */ }
+            resolve();
+          });
+        }).on('error', () => resolve());
+      });
+    }
+
+    // ── 4. Forex via Frankfurter ───────────────────────────────────────────────
+    const forexHoldings = holdings.filter(h => h.type === 'forex');
+    const forexPrices = {}; // symbol → priceSEK (1 unit of symbol in SEK)
+    if (forexHoldings.length) {
+      const syms = [...new Set(forexHoldings.map(h => h.priceSymbol ?? h.symbol))];
+      await new Promise(resolve => {
+        const url = `https://api.frankfurter.app/latest?from=SEK&to=${syms.join(',')}`;
+        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
+          let b = ''; r.on('data', c => b += c); r.on('end', () => {
+            try {
+              const rates = JSON.parse(b)?.rates ?? {};
+              for (const sym of syms) {
+                if (rates[sym]) forexPrices[sym] = 1 / rates[sym]; // convert to SEK per unit
+              }
+            } catch { /* ignore */ }
+            resolve();
+          });
+        }).on('error', () => resolve());
+      });
+    }
+
+    // ── 5. Calculate net worth ─────────────────────────────────────────────────
+    let totalPortfolio = 0;
+    for (const h of holdings.filter(h => ['stock','crypto','forex'].includes(h.type))) {
+      const sym = h.priceSymbol ?? h.symbol;
+      let priceSEK = null;
+      if (h.type === 'stock')  priceSEK = stockPrices[sym] != null ? stockPrices[sym] * usdSek : null;
+      if (h.type === 'crypto') priceSEK = cryptoPrices[sym] ?? null;
+      if (h.type === 'forex')  priceSEK = forexPrices[sym] ?? null;
+      if (priceSEK != null) totalPortfolio += h.shares * priceSEK;
+    }
+
+    const totalRealEstate = holdings.filter(h => h.type === 'realestate').reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+    const totalManual     = holdings.filter(h => h.type === 'manual').reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+    const totalDebt       = holdings.filter(h => h.type === 'debt').reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
+    const netWorth        = totalPortfolio + totalRealEstate + totalManual - totalDebt;
+
+    res.json({
+      netWorth:       Math.round(netWorth),
+      totalPortfolio: Math.round(totalPortfolio),
+      totalRealEstate,
+      totalManual,
+      totalDebt:      Math.round(totalDebt),
+      usdSek:         Math.round(usdSek * 100) / 100,
+      updatedAt:      new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('networth error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Alert server running on http://localhost:${PORT}`);
 });
