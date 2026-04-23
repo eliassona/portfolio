@@ -166,6 +166,38 @@ app.get('/api/coingecko', (req, res) => {
 });
 
 
+// Elprisetjustnu proxy — fetches Nord Pool spot prices for SE3 (or any area), no auth required
+// Usage: GET /api/elpriset?date=2026/04-22&area=SE3
+// Caches the result in memory for the day so the Pi only makes one outbound request per day.
+const elprisetCache = {};
+app.get('/api/elpriset', (req, res) => {
+  const { date, area = 'SE3' } = req.query;
+  if (!date) return res.status(400).json({ error: 'date required (YYYY/MM-DD)' });
+  const cacheKey = `${date}_${area}`;
+  if (elprisetCache[cacheKey]) {
+    return res.json(elprisetCache[cacheKey]);
+  }
+  const url = `https://www.elprisetjustnu.se/api/v1/prices/${date}_${area}.json`;
+  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (epRes) => {
+    let body = '';
+    epRes.on('data', chunk => { body += chunk; });
+    epRes.on('end', () => {
+      try {
+        const data = JSON.parse(body);
+        if (Array.isArray(data) && data.length) elprisetCache[cacheKey] = data;
+        res.setHeader('Content-Type', 'application/json');
+        res.status(epRes.statusCode).send(body);
+      } catch {
+        res.status(epRes.statusCode).send(body);
+      }
+    });
+  }).on('error', err => {
+    console.error('elpriset proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  });
+});
+
 // Big Mac Index proxy — fetches the latest local SEK price for Sweden from The Economist's
 // official dataset on GitHub (updated ~twice a year, the authoritative source).
 // Returns: { local_price: <SEK>, date: <YYYY-MM-DD>, source: "TheEconomist/big-mac-data" }

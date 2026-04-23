@@ -1073,7 +1073,11 @@ export default function App() {
           const y = now.getFullYear();
           const m = String(now.getMonth() + 1).padStart(2, "0");
           const d = String(now.getDate()).padStart(2, "0");
-          const res  = await fetch(`${ALERT_SERVER}/api/elpriset?date=${y}/${m}-${d}&area=SE3`);
+          // 8 second timeout — Pi can be slow making outbound requests
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch(`${ALERT_SERVER}/api/elpriset?date=${y}/${m}-${d}&area=SE3`, { signal: controller.signal });
+          clearTimeout(timer);
           const data = await res.json();
           if (!Array.isArray(data) || !data.length) return null;
           const avgSpot = data.reduce((s, h) => s + (h.SEK_per_kWh ?? 0), 0) / data.length;
