@@ -1062,11 +1062,12 @@ export default function App() {
       setPrices(results);
 
       // Fetch market indexes via Yahoo proxy (same as chart, no CORS issues)
-      // ELEC_SE3: fetch today's spot prices from elprisetjustnu.se (Nord Pool data, free, no auth),
-      // then add energy tax + network fee and apply 25% VAT to get the all-in consumer price.
+      // ELEC_SE3: fetch today's 15-min spot prices from elprisetjustnu.se (Nord Pool, free, no auth).
+      // Since Oct 2025 the API returns 96 x 15-min intervals per day.
+      // We pick the entry whose window covers the current time, then add energy tax + network fee
+      // and apply 25% VAT to get the all-in consumer price.
       //   Energy tax 2026: 0.36 SEK/kWh excl. VAT
       //   Network fee (Ellevio SE3 avg): ~0.45 SEK/kWh excl. VAT
-      //   VAT: 25% on everything
       const fetchElecPrice = async () => {
         try {
           const now = new Date();
@@ -1080,19 +1081,27 @@ export default function App() {
           clearTimeout(timer);
           const data = await res.json();
           if (!Array.isArray(data) || !data.length) return null;
-          const avgSpot = data.reduce((s, h) => s + (h.SEK_per_kWh ?? 0), 0) / data.length;
+          // Find the 15-min slot (or 1h slot) that covers right now; fall back to last entry
+          const nowMs = now.getTime();
+          const current = data.find(e => {
+            const start = new Date(e.time_start).getTime();
+            const end   = new Date(e.time_end).getTime();
+            return nowMs >= start && nowMs < end;
+          }) ?? data[data.length - 1];
+          const spot = current.SEK_per_kWh ?? 0;
           // Add fixed costs (excl. VAT), then apply 25% VAT to the total
-          const ENERGY_TAX = 0.36;   // SEK/kWh excl. VAT (2026 rate)
+          const ENERGY_TAX  = 0.36;  // SEK/kWh excl. VAT (2026 rate)
           const NETWORK_FEE = 0.45;  // SEK/kWh excl. VAT (Ellevio SE3 avg)
-          const allInExVat = avgSpot + ENERGY_TAX + NETWORK_FEE;
-          return +(allInExVat * 1.25).toFixed(3); // incl. 25% VAT
+          const allIn = +((spot + ENERGY_TAX + NETWORK_FEE) * 1.25).toFixed(3); // incl. VAT
+          return { allIn, spot: +spot.toFixed(4) };
         } catch { return null; }
       };
       const indexResults = await Promise.all(
         INDEXES.map(async idx => {
           if (idx.symbol === "ELEC_SE3") {
-            const price = await fetchElecPrice();
-            return { ...idx, value: price, change: null, currency: "SEK/kWh", isStatic: price == null };
+            const elec = await fetchElecPrice();
+            // Store allIn as value (for backwards compat) and spot separately
+            return { ...idx, value: elec?.allIn ?? null, spot: elec?.spot ?? null, change: null, currency: "SEK/kWh", isStatic: elec == null };
           }
           try {
             const res  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(idx.symbol)}&range=5d&interval=1d`);
@@ -1448,6 +1457,7 @@ export default function App() {
                 const isPos = (idx.change ?? 0) >= 0;
                 const isYield = idx.symbol === "^TNX";
                 const isElec  = idx.symbol === "ELEC_SE3";
+                const fmtKwh = n => new Intl.NumberFormat("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
                 const displayVal = idx.value != null
                   ? new Intl.NumberFormat("sv-SE", { minimumFractionDigits: isElec ? 2 : 0, maximumFractionDigits: 2 }).format(idx.value) + (isYield ? "%" : isElec ? " kr/kWh" : "")
                   : "—";
@@ -1461,9 +1471,16 @@ export default function App() {
                       {isLoading && idx.value == null
                         ? <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />
                         : <>
-                            <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace" }}>{displayVal}</div>
+                            <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace" }}>
+                              {displayVal}
+                              {isElec && idx.spot != null &&
+                                <span style={{ fontSize: 11, fontWeight: 400, color: "#6b7280", marginLeft: 5 }}>
+                                  ({fmtKwh(idx.spot)} spot)
+                                </span>
+                              }
+                            </div>
                             {isElec
-                              ? <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>today's avg spot + tax + grid</div>
+                              ? <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>current 15-min slot + tax & grid</div>
                               : idx.change != null && (
                                 <div style={{ fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
                                   {isPos ? "+" : ""}{idx.change.toFixed(2)}%
