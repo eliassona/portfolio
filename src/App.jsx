@@ -756,6 +756,7 @@ export default function App() {
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const ma200wSEKRef                          = useRef(null); // BTC 200W MA — cached so we only fetch the long history once
+  const ma200dSEKRef                          = useRef(null); // BTC 200D MA — cached so we only fetch the long history once
   const [finnhubKey, setFinnhubKey]           = useState("");    // loaded from config.json
   const finnhubKeyRef                         = useRef("");      // ref so fetchAll always has latest key
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
@@ -860,6 +861,7 @@ export default function App() {
         change:     priceData?.[id]?.sek_24h_change ?? null,
         historySEK: null,
         ma200wSEK:  sym === "BTC" ? ma200wSEKRef.current : undefined,
+        ma200dSEK:  sym === "BTC" ? ma200dSEKRef.current : undefined,
       };
       await new Promise(r => setTimeout(r, 2000));
 
@@ -890,6 +892,28 @@ export default function App() {
             }
           }
         } catch { /* 200W MA unavailable */ }
+      }
+
+      // BTC 200D MA via Binance public klines — only fetch once per session, cached in ref
+      if (sym === "BTC" && ma200dSEKRef.current == null) {
+        try {
+          // Binance: 200 daily BTCUSDT candles (no auth, no proxy needed)
+          const klRes = await fetch(
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=200"
+          );
+          if (klRes.ok) {
+            const klines = await klRes.json();
+            // Each kline: [openTime, open, high, low, close, ...]
+            const closes = klines.map(k => parseFloat(k[4]));
+            const avgUsd = closes.reduce((a, b) => a + b, 0) / closes.length;
+            // Convert to SEK using latest USD/SEK rate from CoinGecko price response
+            const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
+            if (usdSekRate > 0) {
+              ma200dSEKRef.current = avgUsd * usdSekRate;
+              results[`crypto:${sym}`].ma200dSEK = ma200dSEKRef.current;
+            }
+          }
+        } catch { /* 200D MA unavailable */ }
       }
     }
     return results;
@@ -1546,6 +1570,35 @@ export default function App() {
                   return <>
                     <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#f59e0b" }}>
                       {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(ma200wSEK)} kr
+                    </div>
+                    {pct != null && (
+                      <div style={{ fontSize: 10, color: above ? "#22d3a5" : "#f87171", marginTop: 1 }}>
+                        {above ? `+${pct}% above` : `${pct}% below`}
+                      </div>
+                    )}
+                  </>;
+                })()}
+              </div>
+            </div>
+            {/* BTC 200-day MA */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>BTC 200D MA</div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>200-day moving average · SEK</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                {(() => {
+                  const ma200dSEK = prices["crypto:BTC"]?.ma200dSEK ?? null;
+                  const btcSEK    = prices["crypto:BTC"]?.priceSEK  ?? null;
+                  if (isLoading && ma200dSEK == null)
+                    return <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />;
+                  if (ma200dSEK == null)
+                    return <div style={{ fontSize: 13, fontFamily: "'DM Mono',monospace", color: "#374151" }}>—</div>;
+                  const above = btcSEK != null && btcSEK > ma200dSEK;
+                  const pct   = btcSEK != null ? (((btcSEK / ma200dSEK) - 1) * 100).toFixed(1) : null;
+                  return <>
+                    <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#f59e0b" }}>
+                      {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(ma200dSEK)} kr
                     </div>
                     {pct != null && (
                       <div style={{ fontSize: 10, color: above ? "#22d3a5" : "#f87171", marginTop: 1 }}>
