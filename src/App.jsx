@@ -13,8 +13,9 @@ const INDEXES = [
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
   { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
-  { symbol: "^OMX",    name: "OMX Stockholm",  group: "Nordic" },
-  { symbol: "^OMXC25", name: "OMX Copenhagen", group: "Nordic" },
+  { symbol: "^OMX",       name: "OMX Stockholm",  group: "Nordic" },
+  { symbol: "^OMXC25",    name: "OMX Copenhagen", group: "Nordic" },
+  { symbol: "SE10Y_BOND", name: "Sweden 10Y",     group: "Nordic" },
   { symbol: "^FTSE",   name: "FTSE 100",       group: "Europe" },
   { symbol: "^GDAXI",  name: "DAX",            group: "Europe" },
   { symbol: "GC=F",    name: "Gold",           group: "Commodities" },
@@ -1147,12 +1148,34 @@ export default function App() {
           return { allIn, spot: +spot.toFixed(4) };
         } catch { return null; }
       };
+      // SE10Y_BOND: fetch the 10-year Swedish government bond yield from Riksbank's
+      // free public SWEA API (series SEGVB10YC), since Yahoo Finance doesn't carry it.
+      const fetchSwedishBondYield = async () => {
+        try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 8000);
+          const res = await fetch(`${ALERT_SERVER}/api/riksbank?series=SEGVB10YC`, { signal: controller.signal });
+          clearTimeout(timer);
+          const data = await res.json();
+          if (!Array.isArray(data) || !data.length) return null;
+          // Observations come back ascending by date; last = latest, prior = for change calc
+          const sorted = [...data].sort((a, b) => new Date(a.date) - new Date(b.date));
+          const last = sorted[sorted.length - 1]?.value ?? null;
+          const prev = sorted.length >= 2 ? sorted[sorted.length - 2]?.value : null;
+          const change = last != null && prev != null && prev !== 0 ? ((last - prev) / prev) * 100 : null;
+          return { value: last, change };
+        } catch { return null; }
+      };
       const indexResults = await Promise.all(
         INDEXES.map(async idx => {
           if (idx.symbol === "ELEC_SE3") {
             const elec = await fetchElecPrice();
             // Store allIn as value (for backwards compat) and spot separately
             return { ...idx, value: elec?.allIn ?? null, spot: elec?.spot ?? null, change: null, currency: "SEK/kWh", isStatic: elec == null };
+          }
+          if (idx.symbol === "SE10Y_BOND") {
+            const bond = await fetchSwedishBondYield();
+            return { ...idx, value: bond?.value ?? null, change: bond?.change ?? null, currency: "SEK" };
           }
           try {
             const res  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(idx.symbol)}&range=5d&interval=1d`);
@@ -1509,14 +1532,15 @@ export default function App() {
               <div style={{ padding: "8px 24px 4px", fontSize: 9, fontWeight: 700, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151" }}>{group}</div>
               {items.map(idx => {
                 const isPos = (idx.change ?? 0) >= 0;
-                const isYield = idx.symbol === "^TNX";
+                const isYield = idx.symbol === "^TNX" || idx.symbol === "SE10Y_BOND";
                 const isElec  = idx.symbol === "ELEC_SE3";
+                const noChart = isElec || idx.symbol === "SE10Y_BOND";
                 const fmtKwh = n => new Intl.NumberFormat("sv-SE", { minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
                 const displayVal = idx.value != null
                   ? new Intl.NumberFormat("sv-SE", { minimumFractionDigits: isElec ? 2 : 0, maximumFractionDigits: 2 }).format(idx.value) + (isYield ? "%" : isElec ? " kr/kWh" : "")
                   : "—";
                 return (
-                  <div key={idx.symbol} className={isElec ? "" : "row-hover"} onClick={isElec ? undefined : () => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: isElec ? "default" : "pointer" }}>
+                  <div key={idx.symbol} className={noChart ? "" : "row-hover"} onClick={noChart ? undefined : () => setSelectedIndex(idx)} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)", transition: "background 0.15s", cursor: noChart ? "default" : "pointer" }}>
                     <div>
                       <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>{idx.name}</div>
                       <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>{isElec ? "SE3 · all-in incl. tax & grid" : idx.symbol}</div>

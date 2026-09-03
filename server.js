@@ -198,6 +198,31 @@ app.get('/api/elpriset', (req, res) => {
   });
 });
 
+// Riksbank SWEA proxy — fetches Swedish government bond yields (and other series) directly
+// from Sveriges Riksbank's free public statistics API, no auth required.
+// Series SEGVB10YC = 10-year Swedish government bond yield (daily, %).
+// Usage: GET /api/riksbank?series=SEGVB10YC
+// Docs: https://developer.api.riksbank.se/
+app.get('/api/riksbank', (req, res) => {
+  const { series = 'SEGVB10YC' } = req.query;
+  const to = new Date();
+  const from = new Date(to.getTime() - 10 * 24 * 60 * 60 * 1000);
+  const fmt = d => d.toISOString().slice(0, 10); // YYYY-MM-DD
+  const url = `https://api.riksbank.se/swea/v1/Observations/${encodeURIComponent(series)}/${fmt(from)}/${fmt(to)}`;
+  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
+  https.get(url, options, (rbRes) => {
+    let body = '';
+    rbRes.on('data', chunk => { body += chunk; });
+    rbRes.on('end', () => {
+      res.setHeader('Content-Type', 'application/json');
+      res.status(rbRes.statusCode).send(body);
+    });
+  }).on('error', err => {
+    console.error('Riksbank proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  });
+});
+
 // Big Mac Index proxy — fetches the latest local SEK price for Sweden from The Economist's
 // official dataset on GitHub (updated ~twice a year, the authoritative source).
 // Returns: { local_price: <SEK>, date: <YYYY-MM-DD>, source: "TheEconomist/big-mac-data" }
