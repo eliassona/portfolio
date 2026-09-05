@@ -118,9 +118,10 @@ app.get('/api/yahoo', (req, res) => {
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
   res.json({
-    bigMacSEK:     config.bigMacSEK     ?? 54,
-    exchangeRates: config.exchangeRates ?? [],
-    finnhubKey:    config.finnhubKey    ?? '',
+    bigMacSEK:        config.bigMacSEK        ?? 54,
+    exchangeRates:    config.exchangeRates    ?? [],
+    finnhubKey:       config.finnhubKey       ?? '',
+    allocationLimits: config.allocationLimits ?? {},
   });
 });
 

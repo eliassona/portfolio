@@ -758,10 +758,12 @@ export default function App() {
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const ma200wSEKRef                          = useRef(null); // BTC 200W MA — cached so we only fetch the long history once
   const ma200dSEKRef                          = useRef(null); // BTC 200D MA — cached so we only fetch the long history once
+  const ma50dSEKRef                           = useRef(null); // BTC 50D MA — cached so we only fetch the history once
   const [finnhubKey, setFinnhubKey]           = useState("");    // loaded from config.json
   const finnhubKeyRef                         = useRef("");      // ref so fetchAll always has latest key
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
   const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
+  const [allocationLimits, setAllocationLimits] = useState({}); // per-category min/max %, configurable via config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
   const [selectedIndex, setSelectedIndex]     = useState(null); // for market index chart modal
@@ -863,6 +865,7 @@ export default function App() {
         historySEK: null,
         ma200wSEK:  sym === "BTC" ? ma200wSEKRef.current : undefined,
         ma200dSEK:  sym === "BTC" ? ma200dSEKRef.current : undefined,
+        ma50dSEK:   sym === "BTC" ? ma50dSEKRef.current  : undefined,
       };
       await new Promise(r => setTimeout(r, 2000));
 
@@ -915,6 +918,27 @@ export default function App() {
             }
           }
         } catch { /* 200D MA unavailable */ }
+      }
+      // BTC 50D MA via Binance public klines — only fetch once per session, cached in ref
+      if (sym === "BTC" && ma50dSEKRef.current == null) {
+        try {
+          // Binance: 50 daily BTCUSDT candles (no auth, no proxy needed)
+          const klRes = await fetch(
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=50"
+          );
+          if (klRes.ok) {
+            const klines = await klRes.json();
+            // Each kline: [openTime, open, high, low, close, ...]
+            const closes = klines.map(k => parseFloat(k[4]));
+            const avgUsd = closes.reduce((a, b) => a + b, 0) / closes.length;
+            // Convert to SEK using latest USD/SEK rate from CoinGecko price response
+            const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
+            if (usdSekRate > 0) {
+              ma50dSEKRef.current = avgUsd * usdSekRate;
+              results[`crypto:${sym}`].ma50dSEK = ma50dSEKRef.current;
+            }
+          }
+        } catch { /* 50D MA unavailable */ }
       }
     }
     return results;
@@ -1266,6 +1290,7 @@ export default function App() {
       if (liveBigMac)           setBigMacSEK(liveBigMac);
       else if (cfg.bigMacSEK)   setBigMacSEK(cfg.bigMacSEK); // fall back to config.json
       if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
+      if (cfg.allocationLimits) setAllocationLimits(cfg.allocationLimits);
       if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
       // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
       const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
@@ -1633,6 +1658,35 @@ export default function App() {
                 })()}
               </div>
             </div>
+            {/* BTC 50-day MA */}
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
+              <div>
+                <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>BTC 50D MA</div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>50-day moving average · SEK</div>
+              </div>
+              <div style={{ textAlign: "right" }}>
+                {(() => {
+                  const ma50dSEK = prices["crypto:BTC"]?.ma50dSEK ?? null;
+                  const btcSEK   = prices["crypto:BTC"]?.priceSEK ?? null;
+                  if (isLoading && ma50dSEK == null)
+                    return <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />;
+                  if (ma50dSEK == null)
+                    return <div style={{ fontSize: 13, fontFamily: "'DM Mono',monospace", color: "#374151" }}>—</div>;
+                  const above = btcSEK != null && btcSEK > ma50dSEK;
+                  const pct   = btcSEK != null ? (((btcSEK / ma50dSEK) - 1) * 100).toFixed(1) : null;
+                  return <>
+                    <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#f59e0b" }}>
+                      {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(ma50dSEK)} kr
+                    </div>
+                    {pct != null && (
+                      <div style={{ fontSize: 10, color: above ? "#22d3a5" : "#f87171", marginTop: 1 }}>
+                        {above ? `+${pct}% above` : `${pct}% below`}
+                      </div>
+                    )}
+                  </>;
+                })()}
+              </div>
+            </div>
           </div>
         </div>
       </div>
@@ -1836,6 +1890,17 @@ export default function App() {
                 {categoryGroups.map((g, i) => {
                   const pct      = allocationTotal > 0 ? (g.valueSEK / allocationTotal) * 100 : 0;
                   const expanded = expandedCat === g.label;
+                  const limits   = allocationLimits[g.label];
+                  // Rebalance amount assumes total allocation value stays constant — i.e. money
+                  // moves between categories rather than new money entering the portfolio.
+                  let breach = null;
+                  if (limits && allocationTotal > 0) {
+                    if (limits.min != null && pct < limits.min) {
+                      breach = { kind: "buy", amount: (limits.min / 100) * allocationTotal - g.valueSEK, limit: limits.min };
+                    } else if (limits.max != null && pct > limits.max) {
+                      breach = { kind: "sell", amount: g.valueSEK - (limits.max / 100) * allocationTotal, limit: limits.max };
+                    }
+                  }
                   return (
                     <div key={g.label}>
                       <div onClick={() => setExpandedCat(expanded ? null : g.label)}
@@ -1846,13 +1911,25 @@ export default function App() {
                           <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 2 }}>{expanded ? "▲" : "▼"}</span>
                         </div>
                         <div style={{ textAlign: "right" }}>
-                          <span style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: g.color }}>{pct.toFixed(1)}%</span>
+                          <span style={{ fontSize: 12, fontFamily: "'DM Mono',monospace", fontWeight: 700, color: breach ? "#f87171" : g.color }}>{pct.toFixed(1)}%</span>
+                          {limits && (
+                            <span style={{ fontSize: 9, color: "#4b5563", marginLeft: 4 }}>
+                              ({limits.min ?? 0}–{limits.max ?? 100}%)
+                            </span>
+                          )}
                           <span style={{ fontSize: 10, color: "#4b5563", marginLeft: 8 }}>{fmtSEK(g.valueSEK)}</span>
                         </div>
                       </div>
-                      <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden", marginBottom: expanded ? 10 : 0 }}>
-                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: g.color, borderRadius: 4, transition: `width 0.9s cubic-bezier(0.4,0,0.2,1) ${i * 80}ms` }} />
+                      <div style={{ height: 6, background: "rgba(255,255,255,0.06)", borderRadius: 4, overflow: "hidden", marginBottom: breach ? 4 : (expanded ? 10 : 0) }}>
+                        <div style={{ height: "100%", width: animated ? `${pct}%` : "0%", background: breach ? "#f87171" : g.color, borderRadius: 4, transition: `width 0.9s cubic-bezier(0.4,0,0.2,1) ${i * 80}ms` }} />
                       </div>
+                      {breach && (
+                        <div style={{ fontSize: 10, color: "#f87171", marginBottom: expanded ? 10 : 0 }}>
+                          {breach.kind === "buy"
+                            ? `Below ${breach.limit}% min — buy ${fmtSEK(breach.amount)} to reach limit`
+                            : `Above ${breach.limit}% max — sell ${fmtSEK(breach.amount)} to reach limit`}
+                        </div>
+                      )}
                       {expanded && (
                         <div style={{ display: "flex", flexDirection: "column", gap: 5, paddingLeft: 14, borderLeft: `2px solid ${g.color}33` }}>
                           {g.positions.map(p => {
