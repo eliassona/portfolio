@@ -758,7 +758,7 @@ export default function App() {
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const ma200wSEKRef                          = useRef(null); // BTC 200W MA — cached so we only fetch the long history once
   const ma200dSEKRef                          = useRef(null); // BTC 200D MA — cached so we only fetch the long history once
-  const ma50dSEKRef                           = useRef(null); // BTC 50D MA — cached so we only fetch the history once
+  const ma50wSEKRef                           = useRef(null); // BTC 50W MA — cached so we only fetch the history once
   const [finnhubKey, setFinnhubKey]           = useState("");    // loaded from config.json
   const finnhubKeyRef                         = useRef("");      // ref so fetchAll always has latest key
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
@@ -865,7 +865,7 @@ export default function App() {
         historySEK: null,
         ma200wSEK:  sym === "BTC" ? ma200wSEKRef.current : undefined,
         ma200dSEK:  sym === "BTC" ? ma200dSEKRef.current : undefined,
-        ma50dSEK:   sym === "BTC" ? ma50dSEKRef.current  : undefined,
+        ma50wSEK:   sym === "BTC" ? ma50wSEKRef.current  : undefined,
       };
       await new Promise(r => setTimeout(r, 2000));
 
@@ -919,12 +919,12 @@ export default function App() {
           }
         } catch { /* 200D MA unavailable */ }
       }
-      // BTC 50D MA via Binance public klines — only fetch once per session, cached in ref
-      if (sym === "BTC" && ma50dSEKRef.current == null) {
+      // BTC 50W MA via Binance public klines — only fetch once per session, cached in ref
+      if (sym === "BTC" && ma50wSEKRef.current == null) {
         try {
-          // Binance: 50 daily BTCUSDT candles (no auth, no proxy needed)
+          // Binance: 50 weekly BTCUSDT candles (no auth, no proxy needed)
           const klRes = await fetch(
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=50"
+            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=50"
           );
           if (klRes.ok) {
             const klines = await klRes.json();
@@ -934,11 +934,11 @@ export default function App() {
             // Convert to SEK using latest USD/SEK rate from CoinGecko price response
             const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
             if (usdSekRate > 0) {
-              ma50dSEKRef.current = avgUsd * usdSekRate;
-              results[`crypto:${sym}`].ma50dSEK = ma50dSEKRef.current;
+              ma50wSEKRef.current = avgUsd * usdSekRate;
+              results[`crypto:${sym}`].ma50wSEK = ma50wSEKRef.current;
             }
           }
-        } catch { /* 50D MA unavailable */ }
+        } catch { /* 50W MA unavailable */ }
       }
     }
     return results;
@@ -1015,9 +1015,12 @@ export default function App() {
     }
 
     // For symbols with no Finnhub data, check if holdings.json has manual dividend info.
-    // dividendFrequency: "monthly" | "quarterly" — we show it if a payment falls in the next 30 days.
+    // dividendFrequency: "monthly" | "quarterly" | "biweekly" — we show it if a payment falls in the next 30 days.
     // For monthly: always show (payment is this month or next).
     // For quarterly: show if today is within 30 days of the next expected payment.
+    // For biweekly (every 14 days): always show — a 14-day cadence always has a payment within 30 days.
+    //   Set dividendAnchorDate (any known past/upcoming ex-dividend date) on the holding for an accurate
+    //   next-payment estimate; without it we just approximate the next date as 14 days from today.
     const today0 = new Date(); today0.setHours(0,0,0,0);
     for (const h of holdings) {
       if (h.type !== "stock") continue;
@@ -1034,6 +1037,19 @@ export default function App() {
         withinWindow = true;
         // Approximate: end of current month
         approxDate = new Date(today0.getFullYear(), today0.getMonth() + 1, 0).toISOString().slice(0, 10);
+      } else if (freq === "biweekly") {
+        // Every 14 days — always due within the next 30 days
+        withinWindow = true;
+        if (h.dividendAnchorDate) {
+          const anchor = new Date(h.dividendAnchorDate); anchor.setHours(0, 0, 0, 0);
+          const diffDays = Math.round((today0 - anchor) / 86400000);
+          const cyclesSince = Math.ceil(diffDays / 14);
+          const next = new Date(anchor.getTime() + cyclesSince * 14 * 86400000);
+          approxDate = next.toISOString().slice(0, 10);
+        } else {
+          // No anchor date on the holding — approximate as one 14-day cycle from today
+          approxDate = new Date(today0.getTime() + 14 * 86400000).toISOString().slice(0, 10);
+        }
       } else if (freq === "quarterly") {
         // Quarterly: check if a quarter-end falls within 30 days
         // Quarter ends: Mar 31, Jun 30, Sep 30, Dec 31
@@ -1658,25 +1674,25 @@ export default function App() {
                 })()}
               </div>
             </div>
-            {/* BTC 50-day MA */}
+            {/* BTC 50-week MA */}
             <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "9px 24px", borderBottom: "1px solid rgba(255,255,255,0.03)" }}>
               <div>
-                <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>BTC 50D MA</div>
-                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>50-day moving average · SEK</div>
+                <div style={{ fontSize: 12, fontWeight: 600, fontFamily: "'DM Mono',monospace" }}>BTC 50W MA</div>
+                <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>50-week moving average · SEK</div>
               </div>
               <div style={{ textAlign: "right" }}>
                 {(() => {
-                  const ma50dSEK = prices["crypto:BTC"]?.ma50dSEK ?? null;
+                  const ma50wSEK = prices["crypto:BTC"]?.ma50wSEK ?? null;
                   const btcSEK   = prices["crypto:BTC"]?.priceSEK ?? null;
-                  if (isLoading && ma50dSEK == null)
+                  if (isLoading && ma50wSEK == null)
                     return <div className="pulsing" style={{ height: 14, width: 80, borderRadius: 4, background: "rgba(255,255,255,0.06)" }} />;
-                  if (ma50dSEK == null)
+                  if (ma50wSEK == null)
                     return <div style={{ fontSize: 13, fontFamily: "'DM Mono',monospace", color: "#374151" }}>—</div>;
-                  const above = btcSEK != null && btcSEK > ma50dSEK;
-                  const pct   = btcSEK != null ? (((btcSEK / ma50dSEK) - 1) * 100).toFixed(1) : null;
+                  const above = btcSEK != null && btcSEK > ma50wSEK;
+                  const pct   = btcSEK != null ? (((btcSEK / ma50wSEK) - 1) * 100).toFixed(1) : null;
                   return <>
                     <div style={{ fontSize: 13, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#f59e0b" }}>
-                      {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(ma50dSEK)} kr
+                      {new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(ma50wSEK)} kr
                     </div>
                     {pct != null && (
                       <div style={{ fontSize: 10, color: above ? "#22d3a5" : "#f87171", marginTop: 1 }}>
@@ -2064,7 +2080,8 @@ export default function App() {
                         const sym = h.priceSymbol ?? h.symbol;
                         if (h.dividendPerShare) {
                           // Manual dividend
-                          const paymentsPerYear = (h.dividendFrequency ?? "quarterly") === "monthly" ? 12 : 4;
+                          const freq = h.dividendFrequency ?? "quarterly";
+                          const paymentsPerYear = freq === "monthly" ? 12 : freq === "biweekly" ? 26 : 4;
                           annual += h.dividendPerShare * h.shares * paymentsPerYear * usdSekRate;
                         } else if (!seen.has(sym)) {
                           // Finnhub dividend — use amountUSD from dividends array if available
