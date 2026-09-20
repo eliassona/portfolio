@@ -299,6 +299,18 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
   const isPos = (p?.change ?? 0) >= 0;
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
+  // Stocks only trade on weekdays — on a closed market this change % is still from the
+  // last session, not something moving live right now. Label it with the actual day instead
+  // of "today" when the price data isn't from today.
+  const WEEKDAY_ABBR   = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const staleDayLabel  = (asOfSeconds) => {
+    if (!asOfSeconds) return null;
+    const d   = new Date(asOfSeconds * 1000);
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    return sameDay ? null : WEEKDAY_ABBR[d.getDay()];
+  };
+  const staleDay = staleDayLabel(p?.asOf);
 
   const renderChart = () => {
     if (loading) return (
@@ -394,7 +406,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
           </div>
           <div style={{ textAlign: "right" }}>
             <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 18, fontWeight: 700 }}>{fmtSEKFull(p?.priceSEK)}</div>
-            {p?.change != null && <div style={{ fontSize: 12, color: isPos ? "#22d3a5" : "#f87171", marginTop: 2 }}>{fmtPct(p.change)} today</div>}
+            {p?.change != null && <div style={{ fontSize: 12, color: isPos ? "#22d3a5" : "#f87171", marginTop: 2 }}>{fmtPct(p.change)} {staleDay ? `(${staleDay})` : "today"}</div>}
             <button onClick={onClose} style={{ marginTop: 6, background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
           </div>
         </div>
@@ -817,7 +829,7 @@ export default function App() {
   const fetchStock = async (symbol) => {
     const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
     // If key isn't loaded yet, skip Finnhub — returns null prices gracefully
-    if (!finnhubKeyRef.current) return { priceUSD: null, prevUSD: null, change: null, historyUSD: null };
+    if (!finnhubKeyRef.current) return { priceUSD: null, prevUSD: null, change: null, historyUSD: null, asOf: null };
     const [quoteRes, historyRes] = await Promise.all([
       fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${finnhubKeyRef.current}`),
       fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(symbol)}&range=1mo&interval=1d`),
@@ -826,6 +838,10 @@ export default function App() {
     const priceUSD = quote.c ?? null;
     const prevUSD  = quote.pc ?? null;
     const change   = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
+    // quote.t is the unix timestamp of the last trade Finnhub has — on a closed market
+    // (weekend/holiday) this stays pinned to the last session's close, letting the UI
+    // tell "today" apart from "stale, market is closed" instead of implying a live move.
+    const asOf = quote.t ?? null;
     let historyUSD = null;
     try {
       const hJson  = await historyRes.json();
@@ -833,7 +849,7 @@ export default function App() {
       const filtered = closes.filter(v => v != null);
       if (filtered.length > 1) historyUSD = filtered;
     } catch { /* history unavailable */ }
-    return { priceUSD, change, historyUSD };
+    return { priceUSD, prevUSD, change, historyUSD, asOf };
   };
 
   // ── Crypto via CoinGecko (proxied through server to avoid CORS/rate limits) ──
@@ -1105,16 +1121,17 @@ export default function App() {
       for (const key of uniqueStockKeys) {
         const sym = key.replace(/^stock:/, "");
         try {
-          const { priceUSD, prevUSD, change, historyUSD } = await fetchStock(sym);
+          const { priceUSD, prevUSD, change, historyUSD, asOf } = await fetchStock(sym);
           results[key] = {
             priceSEK:   priceUSD != null ? priceUSD * usdSek : null,
             prevUSD,
             priceUSD,
             historySEK: historyUSD != null ? historyUSD.map(v => v * usdSek) : null,
             change,
+            asOf,
           };
         } catch {
-          results[key] = { priceSEK: null, change: null, historySEK: null };
+          results[key] = { priceSEK: null, change: null, historySEK: null, asOf: null };
         }
         await new Promise(r => setTimeout(r, 250));
       }
@@ -1221,14 +1238,21 @@ export default function App() {
             const res  = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(idx.symbol)}&range=5d&interval=1d`);
             const json = await res.json();
             const result = json?.chart?.result?.[0];
-            const closes = result?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+            const timestamps = result?.timestamp ?? [];
+            const rawCloses  = result?.indicators?.quote?.[0]?.close ?? [];
+            // Keep timestamp/close pairs together so we know exactly which trading day
+            // the last valid close is from — needed to tell "today" apart from a stale
+            // (market-closed) value on weekends/holidays.
+            const validPairs = rawCloses.map((v, i) => ({ v, t: timestamps[i] })).filter(o => o.v != null);
+            const closes = validPairs.map(o => o.v);
             const prev   = closes.length >= 2 ? closes[closes.length - 2] : null;
             const last   = closes.length >= 1 ? closes[closes.length - 1] : null;
+            const asOf   = validPairs.length ? validPairs[validPairs.length - 1].t : null;
             const change = last != null && prev != null && prev !== 0 ? ((last - prev) / prev) * 100 : null;
             const currency = result?.meta?.currency ?? "USD";
-            return { ...idx, value: last, change, currency };
+            return { ...idx, value: last, change, currency, asOf };
           } catch {
-            return { ...idx, value: null, change: null, currency: "USD" };
+            return { ...idx, value: null, change: null, currency: "USD", asOf: null };
           }
         })
       );
@@ -1337,19 +1361,33 @@ export default function App() {
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
 
+  // Stocks/indices only trade on weekdays — on a closed market (weekend/holiday) the
+  // last change % we have is still Friday's move, not something happening live today.
+  // Compares the price's timestamp to "now" in local time and, if it's not today,
+  // returns the weekday it's actually from so the UI can say "(Fri)" instead of "today".
+  const WEEKDAY_ABBR = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
+  const staleDayLabel = (asOfSeconds) => {
+    if (!asOfSeconds) return null;
+    const d   = new Date(asOfSeconds * 1000);
+    const now = new Date();
+    const sameDay = d.getFullYear() === now.getFullYear() && d.getMonth() === now.getMonth() && d.getDate() === now.getDate();
+    return sameDay ? null : WEEKDAY_ABBR[d.getDay()];
+  };
+
   // ── Enrich each holding with live price data ───────────────────────────────
   const enriched = holdings.map(h => {
     const p          = prices[getPriceKey(h)];
     const priceSEK   = p?.priceSEK   ?? null;
     const change     = p?.change     ?? null;
     const historySEK = p?.historySEK ?? null;
+    const asOf       = p?.asOf       ?? null;
     const valueSEK   = priceSEK != null ? h.shares * priceSEK : null;
     // avgCost may be in USD — convert to SEK if currency field says so
     const avgCostSEK = h.currency === "USD" ? h.avgCost * usdSekRate : h.avgCost;
     const costSEK    = h.shares * avgCostSEK;
     const gainSEK    = valueSEK != null ? valueSEK - costSEK : null;
     const gainPct    = gainSEK != null && costSEK !== 0 ? (gainSEK / costSEK) * 100 : null;
-    return { ...h, priceSEK, change, historySEK, valueSEK, costSEK, gainSEK, gainPct };
+    return { ...h, priceSEK, change, historySEK, asOf, valueSEK, costSEK, gainSEK, gainPct };
   });
 
   const totalValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
@@ -1371,6 +1409,11 @@ export default function App() {
   const isLoading    = fetchStatus === "loading";
 
   const priced = enriched.filter(h => h.change != null);
+  // If any stock's price is from a prior session (market closed today), the blended
+  // "today" figures below are really "since last close" — label them accordingly rather
+  // than implying live weekend/holiday movement.
+  const anyStaleStocks = enriched.some(h => h.type === "stock" && staleDayLabel(h.asOf));
+  const dayLabel = anyStaleStocks ? "since last close" : "today";
   const best   = priced.length ? [...priced].sort((a, b) => b.change - a.change)[0] : null;
   const worst  = priced.length ? [...priced].sort((a, b) => a.change - b.change)[0] : null;
 
@@ -1602,7 +1645,7 @@ export default function App() {
                               ? <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>current 15-min slot + tax & grid</div>
                               : idx.change != null && (
                                 <div style={{ fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
-                                  {isPos ? "+" : ""}{idx.change.toFixed(2)}%
+                                  {isPos ? "+" : ""}{idx.change.toFixed(2)}%{staleDayLabel(idx.asOf) ? ` (${staleDayLabel(idx.asOf)})` : ""}
                                 </div>
                               )
                             }
@@ -1753,7 +1796,11 @@ export default function App() {
                     ? <div style={{ height: 14, width: 60, borderRadius: 4, background: "rgba(255,255,255,0.06)",  }} />
                     : <>
                         <div style={{ fontFamily: "'DM Mono',monospace", fontSize: 12 }}>{fmtSEKFull(h.priceSEK)}</div>
-                        {h.change != null && <div style={{ fontSize: 10, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>{fmtPct(h.change)}</div>}
+                        {h.change != null && (
+                          <div style={{ fontSize: 10, color: isPos ? "#22d3a5" : "#f87171", marginTop: 1 }}>
+                            {fmtPct(h.change)}{staleDayLabel(h.asOf) ? ` (${staleDayLabel(h.asOf)})` : ""}
+                          </div>
+                        )}
                       </>
                   }
                 </td>
@@ -1883,7 +1930,7 @@ export default function App() {
         <div className={`metrics-grid fade-in ${animated ? "visible" : ""}`}>
           <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : "Assets minus debt"} accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
           <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
-          <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " today"} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
+          <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " " + dayLabel} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
           <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
         </div>
 
@@ -1977,8 +2024,8 @@ export default function App() {
               {priced.length > 0 ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {[
-                    { label: "Winners today",   value: priced.filter(h => h.change > 0).length, color: "#22d3a5" },
-                    { label: "Losers today",    value: priced.filter(h => h.change < 0).length, color: "#f87171" },
+                    { label: `Winners ${dayLabel}`,   value: priced.filter(h => h.change > 0).length, color: "#22d3a5" },
+                    { label: `Losers ${dayLabel}`,    value: priced.filter(h => h.change < 0).length, color: "#f87171" },
                     { label: "Best performer",  value: best  ? getDisplaySymbol(best)  : "—", sub: best  ? fmtPct(best.change)  : "", color: "#22d3a5" },
                     { label: "Worst performer", value: worst ? getDisplaySymbol(worst) : "—", sub: worst ? fmtPct(worst.change) : "", color: "#f87171" },
                   ].map(item => (
