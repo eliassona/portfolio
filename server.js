@@ -377,6 +377,218 @@ app.get('/api/networth', async (req, res) => {
   }
 });
 
+// Category for allocation grouping — mirrors getCategory() in App.jsx
+function getCategory(h) {
+  if (h.category) return h.category;
+  if (h.type === 'crypto')     return 'Crypto';
+  if (h.type === 'forex')      return 'Cash';
+  if (h.type === 'realestate') return 'Real Estate';
+  if (h.type === 'debt')       return null; // excluded from allocation
+  return 'Stocks';
+}
+
+// Portfolio endpoint — full breakdown of every value shown in the dashboard UI:
+// per-holding price/value/gain, category totals, allocation %, and the same
+// top-level metrics as the metric cards (net worth, portfolio, day P&L, debt).
+app.get('/api/portfolio', async (req, res) => {
+  try {
+    const config   = loadConfig();
+    const holdings = JSON.parse(readFileSync('./holdings.json', 'utf8'));
+    const finnhubKey = config.finnhubKey ?? '';
+
+    // ── 1. USD/SEK rate via Yahoo ──────────────────────────────────────────────
+    const usdSek = await new Promise((resolve) => {
+      const url = 'https://query2.finance.yahoo.com/v8/finance/chart/SEK%3DX?range=5d&interval=1d';
+      https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, r => {
+        let b = ''; r.on('data', c => b += c); r.on('end', () => {
+          try {
+            const closes = JSON.parse(b)?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+            resolve(closes.at(-1) ?? 10.5);
+          } catch { resolve(10.5); }
+        });
+      }).on('error', () => resolve(10.5));
+    });
+
+    // ── 2. Stock quotes via Finnhub (price + prev close, like the frontend) ────
+    const stockHoldings   = holdings.filter(h => h.type === 'stock');
+    const uniqueStockSyms = [...new Set(stockHoldings.map(h => h.priceSymbol ?? h.symbol))];
+    const stockQuotes = {}; // symbol → { priceUSD, prevUSD, change }
+    if (finnhubKey) {
+      await Promise.all(uniqueStockSyms.map(sym => new Promise(resolve => {
+        const url = `https://finnhub.io/api/v1/quote?symbol=${encodeURIComponent(sym)}&token=${finnhubKey}`;
+        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0' } }, r => {
+          let b = ''; r.on('data', c => b += c); r.on('end', () => {
+            try {
+              const q = JSON.parse(b);
+              const priceUSD = q.c ?? null;
+              const prevUSD  = q.pc ?? null;
+              const change   = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
+              stockQuotes[sym] = { priceUSD, prevUSD, change };
+            } catch { stockQuotes[sym] = { priceUSD: null, prevUSD: null, change: null }; }
+            resolve();
+          });
+        }).on('error', () => { stockQuotes[sym] = { priceUSD: null, prevUSD: null, change: null }; resolve(); });
+      })));
+    }
+
+    // ── 3. Crypto via CoinGecko (price + usd + 24h change, single request) ─────
+    const COINGECKO_IDS = { BTC: 'bitcoin' }; // extend as needed, mirrors frontend
+    const cryptoHoldings = holdings.filter(h => h.type === 'crypto');
+    const cryptoQuotes = {}; // symbol → { priceSEK, priceUSD, change }
+    if (cryptoHoldings.length) {
+      const ids = [...new Set(cryptoHoldings.map(h => COINGECKO_IDS[h.priceSymbol ?? h.symbol]).filter(Boolean))].join(',');
+      if (ids) await new Promise(resolve => {
+        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=sek,usd&include_24hr_change=true`;
+        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
+          let b = ''; r.on('data', c => b += c); r.on('end', () => {
+            try {
+              const data = JSON.parse(b);
+              for (const h of cryptoHoldings) {
+                const sym = h.priceSymbol ?? h.symbol;
+                const id  = COINGECKO_IDS[sym];
+                if (id && data[id]) {
+                  cryptoQuotes[sym] = { priceSEK: data[id].sek ?? null, priceUSD: data[id].usd ?? null, change: data[id].sek_24h_change ?? null };
+                }
+              }
+            } catch { /* ignore */ }
+            resolve();
+          });
+        }).on('error', () => resolve());
+      });
+    }
+
+    // ── 4. Forex via Frankfurter (no day-change data, mirrors frontend) ────────
+    const forexHoldings = holdings.filter(h => h.type === 'forex');
+    const forexQuotes = {}; // symbol → { priceSEK, change }
+    if (forexHoldings.length) {
+      const syms = [...new Set(forexHoldings.map(h => h.priceSymbol ?? h.symbol))];
+      forexQuotes['SEK'] = { priceSEK: 1, change: null };
+      const toFetch = syms.filter(s => s !== 'SEK');
+      if (toFetch.length) await new Promise(resolve => {
+        const url = `https://api.frankfurter.app/latest?from=SEK&to=${toFetch.join(',')}`;
+        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
+          let b = ''; r.on('data', c => b += c); r.on('end', () => {
+            try {
+              const rates = JSON.parse(b)?.rates ?? {};
+              for (const sym of toFetch) {
+                forexQuotes[sym] = { priceSEK: rates[sym] ? 1 / rates[sym] : null, change: null };
+              }
+            } catch { /* ignore */ }
+            resolve();
+          });
+        }).on('error', () => resolve());
+      });
+    }
+
+    // ── 5. Enrich every priced holding (stock/crypto/forex) ────────────────────
+    const enriched = holdings
+      .filter(h => ['stock', 'crypto', 'forex'].includes(h.type))
+      .map(h => {
+        const sym = h.priceSymbol ?? h.symbol;
+        let priceUSD = null, prevUSD = null, priceSEK = null, change = null;
+        if (h.type === 'stock') {
+          const q = stockQuotes[sym] ?? {};
+          priceUSD = q.priceUSD ?? null;
+          prevUSD  = q.prevUSD  ?? null;
+          change   = q.change   ?? null;
+          priceSEK = priceUSD != null ? priceUSD * usdSek : null;
+        } else if (h.type === 'crypto') {
+          const q = cryptoQuotes[sym] ?? {};
+          priceUSD = q.priceUSD ?? null;
+          priceSEK = q.priceSEK ?? null;
+          change   = q.change   ?? null;
+        } else if (h.type === 'forex') {
+          const q = forexQuotes[sym] ?? {};
+          priceSEK = q.priceSEK ?? null;
+          change   = q.change   ?? null;
+        }
+        const valueSEK   = priceSEK != null ? h.shares * priceSEK : null;
+        const avgCostSEK = h.avgCost != null ? (h.currency === 'USD' ? h.avgCost * usdSek : h.avgCost) : null;
+        const costSEK    = avgCostSEK != null ? h.shares * avgCostSEK : null;
+        const gainSEK    = valueSEK != null && costSEK != null ? valueSEK - costSEK : null;
+        const gainPct    = gainSEK != null && costSEK ? (gainSEK / costSEK) * 100 : null;
+        // Day change contribution in SEK — stocks use USD move × FX rate, crypto/forex use % change directly
+        let dayChangeSEK = null;
+        if (h.type === 'stock' && priceUSD != null && prevUSD != null) {
+          dayChangeSEK = (priceUSD - prevUSD) * usdSek * h.shares;
+        } else if (change != null && priceSEK != null) {
+          dayChangeSEK = (priceSEK * change / 100) * h.shares;
+        }
+        return {
+          symbol: sym, displaySymbol: h.displaySymbol ?? sym, name: h.name ?? null,
+          type: h.type, category: getCategory(h), account: h.account ?? null,
+          shares: h.shares, avgCost: h.avgCost ?? null, currency: h.currency ?? null,
+          priceSEK, priceUSD, changePct: change, dayChangeSEK,
+          valueSEK, costSEK, gainSEK, gainPct,
+        };
+      });
+
+    // ── 6. Static holdings: real estate, manual assets, debt ───────────────────
+    const realEstate = holdings.filter(h => h.type === 'realestate').map(h => ({
+      symbol: h.symbol ?? h.name, name: h.name ?? null, category: getCategory(h),
+      account: h.account ?? null, valueSEK: h.valueSEK ?? 0,
+    }));
+    const manual = holdings.filter(h => h.type === 'manual').map(h => ({
+      symbol: h.symbol ?? h.name, name: h.name ?? null, category: getCategory(h),
+      account: h.account ?? null, valueSEK: h.valueSEK ?? 0,
+    }));
+    const debt = holdings.filter(h => h.type === 'debt').map(h => ({
+      symbol: h.symbol ?? h.name, name: h.name ?? null,
+      account: h.account ?? null, balanceSEK: h.balanceSEK ?? 0, interestRate: h.interestRate ?? null,
+    }));
+
+    // ── 7. Totals — mirrors the metric cards + allocation panel on the frontend ─
+    const totalValue      = enriched.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+    const totalCost       = enriched.reduce((s, h) => s + (h.costSEK ?? 0), 0);
+    const totalGain       = totalValue - totalCost;
+    const totalGainPct    = totalCost > 0 ? (totalGain / totalCost) * 100 : null;
+    const dayChange       = enriched.reduce((s, h) => s + (h.dayChangeSEK ?? 0), 0);
+    const totalRealEstate = realEstate.reduce((s, h) => s + h.valueSEK, 0);
+    const totalManual     = manual.reduce((s, h) => s + h.valueSEK, 0);
+    const totalDebt       = debt.reduce((s, h) => s + h.balanceSEK, 0);
+    const netWorth         = totalValue + totalRealEstate + totalManual - totalDebt;
+    const missingPrices    = enriched.filter(h => h.priceSEK == null).length;
+
+    // Allocation by category — uses live value, falling back to cost basis when a price is missing
+    const allocationTotal = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0) + totalRealEstate + totalManual;
+    const byCategory = {};
+    for (const h of [...enriched, ...realEstate, ...manual]) {
+      if (!h.category) continue;
+      const v = h.valueSEK ?? h.costSEK ?? 0;
+      byCategory[h.category] = (byCategory[h.category] ?? 0) + v;
+    }
+    const allocation = Object.entries(byCategory).map(([category, valueSEK]) => ({
+      category, valueSEK, pct: allocationTotal > 0 ? (valueSEK / allocationTotal) * 100 : 0,
+    })).sort((a, b) => b.valueSEK - a.valueSEK);
+
+    res.json({
+      summary: {
+        netWorth: Math.round(netWorth),
+        totalValue: Math.round(totalValue),
+        totalCost: Math.round(totalCost),
+        totalGain: Math.round(totalGain),
+        totalGainPct,
+        dayChangeSEK: Math.round(dayChange),
+        dayChangePct: totalValue > 0 ? (dayChange / totalValue) * 100 : null,
+        totalRealEstate: Math.round(totalRealEstate),
+        totalManual: Math.round(totalManual),
+        totalDebt: Math.round(totalDebt),
+        usdSek: Math.round(usdSek * 100) / 100,
+        missingPrices,
+      },
+      holdings: enriched,
+      realEstate,
+      manual,
+      debt,
+      allocation,
+      updatedAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    console.error('portfolio error:', err.message);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 app.listen(PORT, () => {
   console.log(`Alert server running on http://localhost:${PORT}`);
 });
