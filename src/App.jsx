@@ -4,6 +4,65 @@ import holdingsData from "../holdings.json";
 const FINNHUB_KEY      = ""; // loaded from config.json via /api/config
 const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
 const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:3001`;
+
+// ── BTC data sources ─────────────────────────────────────────────────────────
+// Spot price: mempool.space (USD) × USD/SEK. History: Binance klines (USD) × daily USD/SEK.
+// Other coins (if ever added to COINGECKO_IDS) still go through the CoinGecko proxy.
+async function mempoolBtcSpot(usdSek) {
+  const res = await fetch(`${ALERT_SERVER}/api/mempool?path=v1/prices`);
+  if (!res.ok) throw new Error(`mempool prices ${res.status}`);
+  const now = await res.json();
+  const priceUSD = now?.USD;
+  if (!(priceUSD > 0)) return null;
+  // 24h change: mempool.space historical price, falling back to Binance 24h-old candle
+  let prev = null;
+  try {
+    const ts = Math.floor(Date.now() / 1000) - 86400;
+    const hRes = await fetch(`${ALERT_SERVER}/api/mempool?path=v1/historical-price&currency=USD&timestamp=${ts}`);
+    if (hRes.ok) prev = (await hRes.json())?.prices?.[0]?.USD ?? null;
+  } catch { /* fall through */ }
+  if (!(prev > 0)) {
+    try { prev = (await binanceBtcUSD(1))?.[0]?.[1] ?? null; } catch { /* no change available */ }
+  }
+  const change = prev > 0 ? ((priceUSD - prev) / prev) * 100 : null;
+  return { priceUSD, priceSEK: priceUSD * usdSek, change };
+}
+
+async function binanceBtcUSD(days) {
+  let interval, limit;
+  if      (days <= 1)  { interval = "15m"; limit = 96; }
+  else if (days <= 7)  { interval = "1h";  limit = days * 24; }
+  else if (days <= 90) { interval = "4h";  limit = days * 6; }
+  else                 { interval = "1d";  limit = Math.min(days, 1000); }
+  const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+  if (!res.ok) throw new Error(`Binance ${res.status}`);
+  const k = await res.json();
+  return k.map(c => [c[0], parseFloat(c[4])]);
+}
+
+async function usdSekDailyMap() {
+  const map = {};
+  try {
+    const res = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=SEK%3DX&range=2y&interval=1d`);
+    const r   = (await res.json())?.chart?.result?.[0];
+    const cl  = r?.indicators?.quote?.[0]?.close ?? [];
+    (r?.timestamp ?? []).forEach((t, i) => { if (cl[i] != null) map[new Date(t * 1000).toISOString().slice(0, 10)] = cl[i]; });
+  } catch { /* fall back to spot rate */ }
+  return map;
+}
+
+// Drop-in replacement for the old CoinGecko market_chart call → { prices: [[t, v], ...] }
+async function marketChart(coinId, vs, days, fallbackRate = 10.5) {
+  if (coinId !== "bitcoin") {
+    const res = await fetch(`${ALERT_SERVER}/api/coingecko?path=coins/${coinId}/market_chart&vs_currency=${vs}&days=${days}`);
+    if (res.status === 429) throw new Error("CoinGecko rate limit — wait a moment and try again");
+    return res.json();
+  }
+  const usd = await binanceBtcUSD(days);
+  if (vs === "usd") return { prices: usd };
+  const fx = await usdSekDailyMap();
+  return { prices: usd.map(([t, v]) => [t, v * (fx[new Date(t).toISOString().slice(0, 10)] ?? fallbackRate)]) };
+}
 const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
 const COLORS = ["#22d3a5", "#6366f1", "#f59e0b", "#ec4899", "#38bdf8", "#a78bfa", "#fb923c", "#34d399"];
 
@@ -188,9 +247,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else if (timeframe === "1M")  days = 30;
         else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
         else                          days = 365;
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/coingecko?path=coins/${id}/market_chart&vs_currency=sek&days=${days}`);
-        if (res.status === 429) throw new Error("CoinGecko rate limit — wait a moment and try again");
-        const json = await res.json();
+        const json = await marketChart(id, "sek", days, rateRef.current);
         if (json.prices?.length) data = json.prices.map(([t, v]) => ({ t, v }));
       } else if (type === "forex") {
         let startDate;
@@ -267,10 +324,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         const id = COINGECKO_IDS[sym];
         if (!id) return;
         // CoinGecko free tier: days>90 returns daily granularity automatically
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/coingecko?path=coins/${id}/market_chart&vs_currency=sek&days=730`);
-        if (res.status === 429) throw new Error("Rate limited — try again in a moment");
-        const json = await res.json();
-        if (json.status?.error_code) throw new Error("Rate limited — try again in a moment");
+        const json = await marketChart(id, "sek", 730, rateRef.current);
         daily  = (json.prices ?? []).map(([t, v]) => ({ t, v }));
         weekly = daily.filter((_, i) => i % 7 === 0);
       }
@@ -476,8 +530,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
         else if (timeframe === "1M")  days = 30;
         else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
         else                          days = 365;
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/coingecko?path=coins/bitcoin/market_chart&vs_currency=usd&days=${days}`);
-        const json = await res.json();
+        const json = await marketChart("bitcoin", "usd", days, usdSekRate);
         if (json.prices?.length) {
           if (rate.chartId === "BTC_USD") {
             data = json.prices.map(([t, v]) => ({ t, v }));
@@ -510,8 +563,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
         else if (timeframe === "1M")  days = 30;
         else if (timeframe === "YTD") days = Math.ceil((Date.now() - new Date(now.getFullYear(),0,1)) / 86400000);
         else                          days = 365;
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/coingecko?path=coins/bitcoin/market_chart&vs_currency=sek&days=${days}`);
-        const json = await res.json();
+        const json = await marketChart("bitcoin", "sek", days, usdSekRate);
         if (json.prices?.length) {
           data = json.prices.map(([t, btcSek]) => ({
             t,
@@ -862,15 +914,30 @@ export default function App() {
   };
 
   // Fetch all crypto prices in ONE request, then history per coin with delays
-  const fetchAllCrypto = async (symbols) => {
+  const fetchAllCrypto = async (symbols, usdSek) => {
     const entries = symbols.map(sym => ({ sym, id: COINGECKO_IDS[sym] })).filter(e => e.id);
     if (!entries.length) return {};
-    const allIds = entries.map(e => e.id).join(",");
-    // Single price call for all coins
     let priceData = {};
-    try {
-      priceData = await cgFetch("simple/price", { ids: allIds, vs_currencies: "sek,usd", include_24hr_change: true });
-    } catch { /* price unavailable */ }
+    // Non-BTC coins (none by default): one batched CoinGecko call
+    const nonBtc = entries.filter(e => e.sym !== "BTC");
+    if (nonBtc.length) {
+      try {
+        priceData = await cgFetch("simple/price", { ids: nonBtc.map(e => e.id).join(","), vs_currencies: "sek,usd", include_24hr_change: true }) ?? {};
+      } catch { /* price unavailable */ }
+    }
+    // BTC: mempool.space first, CoinGecko as fallback
+    if (entries.some(e => e.sym === "BTC")) {
+      try {
+        const q = await mempoolBtcSpot(usdSek);
+        if (q) priceData.bitcoin = { sek: q.priceSEK, usd: q.priceUSD, sek_24h_change: q.change };
+      } catch (e) { console.warn("mempool.space BTC price failed:", e.message); }
+      if (!priceData.bitcoin) {
+        try {
+          const cg = await cgFetch("simple/price", { ids: "bitcoin", vs_currencies: "sek,usd", include_24hr_change: true });
+          if (cg?.bitcoin) priceData.bitcoin = cg.bitcoin;
+        } catch { /* both sources failed */ }
+      }
+    }
     // History per coin sequentially with delay
     const results = {};
     for (const { sym, id } of entries) {
@@ -883,11 +950,13 @@ export default function App() {
         ma200dSEK:  sym === "BTC" ? ma200dSEKRef.current : undefined,
         ma50wSEK:   sym === "BTC" ? ma50wSEKRef.current  : undefined,
       };
-      await new Promise(r => setTimeout(r, 2000));
+      if (sym !== "BTC") await new Promise(r => setTimeout(r, 2000)); // CoinGecko rate-limit spacing
 
-      // 30-day sparkline via CoinGecko (unchanged)
+      // 30-day sparkline (BTC via Binance, others via CoinGecko)
       try {
-        const historyData = await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
+        const historyData = sym === "BTC"
+          ? await marketChart("bitcoin", "sek", 30, usdSek)
+          : await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
         if (historyData?.prices) results[`crypto:${sym}`].historySEK = historyData.prices.map(([, p]) => p);
       } catch { /* sparkline unavailable */ }
 
@@ -1139,7 +1208,7 @@ export default function App() {
       // Fetch all crypto in one batched price call + sequential history
       const cryptoSyms = uniqueCryptoKeys.map(k => k.replace(/^crypto:/, ""));
       try {
-        const cryptoResults = await fetchAllCrypto(cryptoSyms);
+        const cryptoResults = await fetchAllCrypto(cryptoSyms, usdSek);
         Object.assign(results, cryptoResults);
       } catch {
         uniqueCryptoKeys.forEach(key => { results[key] = { priceSEK: null, change: null, historySEK: null }; });
@@ -1937,7 +2006,7 @@ export default function App() {
         <div className="main-grid">
           <div className={`fade-in ${animated ? "visible" : ""}`} style={{ transitionDelay: "80ms" }}>
             {stockRows.length     > 0 && <HoldingsTable rows={stockRows}  title="Stocks"     sourceLabel="via Finnhub" />}
-            {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via CoinGecko" />}
+            {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via mempool.space" />}
             {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Cash" sourceLabel="via Frankfurter" showSparkline={false} />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
@@ -2234,7 +2303,7 @@ export default function App() {
 
             <div style={{ background: "rgba(34,211,165,0.05)", border: "1px solid rgba(34,211,165,0.15)", borderRadius: 12, padding: "12px 16px" }}>
               <p style={{ margin: 0, fontSize: 10, color: "#22d3a5", lineHeight: 1.8 }}>
-                ⚡ Stocks: Finnhub · Crypto: CoinGecko · Forex: Frankfurter<br/>
+                ⚡ Stocks: Finnhub · Crypto: mempool.space · Forex: Frankfurter<br/>
                 All values in SEK. Edit <strong>holdings.json</strong> to update positions.
               </p>
             </div>

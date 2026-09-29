@@ -167,6 +167,29 @@ app.get('/api/coingecko', (req, res) => {
 });
 
 
+// mempool.space proxy — same pattern as /api/coingecko. Usage: /api/mempool?path=v1/prices
+app.get('/api/mempool', (req, res) => {
+  const path = req.query.path;
+  if (!path) return res.status(400).json({ error: 'path required' });
+  const qs = Object.entries(req.query)
+    .filter(([k]) => k !== 'path')
+    .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
+    .join('&');
+  const url = `https://mempool.space/api/${path}${qs ? '?' + qs : ''}`;
+  https.get(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } }, (mRes) => {
+    let body = '';
+    mRes.on('data', chunk => { body += chunk; });
+    mRes.on('end', () => {
+      if (mRes.statusCode !== 200) console.error('mempool proxy', mRes.statusCode, body.slice(0, 200));
+      res.setHeader('Content-Type', 'application/json');
+      res.status(mRes.statusCode).send(body);
+    });
+  }).on('error', err => {
+    console.error('mempool proxy error:', err.message);
+    res.status(500).json({ error: err.message });
+  });
+});
+
 // Elprisetjustnu proxy — fetches Nord Pool spot prices for SE3 (or any area), no auth required
 // Usage: GET /api/elpriset?date=2026/04-22&area=SE3
 // Caches the result in memory for the day so the Pi only makes one outbound request per day.
@@ -264,6 +287,59 @@ app.get('/api/bigmac', (req, res) => {
   });
 });
 
+// ── Crypto price helpers ─────────────────────────────────────────────────────
+// Primary source: mempool.space (BTC only, USD). SEK = USD × usdSek.
+// Fallback (and other coins): CoinGecko.
+function getJson(url) {
+  return new Promise(resolve => {
+    https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
+      let b = ''; r.on('data', c => b += c); r.on('end', () => {
+        if (r.statusCode !== 200) {
+          console.error(`getJson ${r.statusCode} for ${url}: ${b.slice(0, 200)}`);
+          return resolve(null);
+        }
+        try { resolve(JSON.parse(b)); } catch (e) { console.error('getJson parse error:', url, e.message); resolve(null); }
+      });
+    }).on('error', err => { console.error('getJson error:', url, err.message); resolve(null); });
+  });
+}
+
+async function fetchBtcMempool(usdSek) {
+  const now = await getJson('https://mempool.space/api/v1/prices');
+  if (!now?.USD) return null;
+  const dayAgo = Math.floor(Date.now() / 1000) - 86400;
+  const hist = await getJson(`https://mempool.space/api/v1/historical-price?currency=USD&timestamp=${dayAgo}`);
+  const prev = hist?.prices?.[0]?.USD;
+  const change = prev > 0 ? ((now.USD - prev) / prev) * 100 : null;
+  return { priceUSD: now.USD, priceSEK: now.USD * usdSek, change };
+}
+
+const COINGECKO_IDS = { BTC: 'bitcoin' }; // extend as needed
+async function fetchCoinGeckoQuotes(syms) {
+  const ids = [...new Set(syms.map(s => COINGECKO_IDS[s]).filter(Boolean))].join(',');
+  if (!ids) return {};
+  const data = await getJson(`https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=sek,usd&include_24hr_change=true`);
+  const out = {};
+  for (const sym of syms) {
+    const id = COINGECKO_IDS[sym];
+    if (id && data?.[id]) out[sym] = { priceSEK: data[id].sek ?? null, priceUSD: data[id].usd ?? null, change: data[id].sek_24h_change ?? null };
+  }
+  return out;
+}
+
+// Returns { [symbol]: { priceSEK, priceUSD, change } }
+async function fetchCryptoQuotes(cryptoHoldings, usdSek) {
+  const syms = [...new Set(cryptoHoldings.map(h => h.priceSymbol ?? h.symbol))];
+  const quotes = {};
+  if (syms.includes('BTC')) {
+    const q = await fetchBtcMempool(usdSek);
+    if (q) quotes.BTC = q; else console.warn('mempool.space BTC failed, falling back to CoinGecko');
+  }
+  const missing = syms.filter(s => !quotes[s]);
+  if (missing.length) Object.assign(quotes, await fetchCoinGeckoQuotes(missing));
+  return quotes;
+}
+
 // Net Worth endpoint — replicates the frontend calculation server-side for the Apple Watch widget.
 // Fetches live prices for stocks (Yahoo), crypto (CoinGecko), and forex (Frankfurter),
 // then combines with static holdings.json values for real estate, manual assets, and debt.
@@ -302,28 +378,10 @@ app.get('/api/networth', async (req, res) => {
       }).on('error', () => { stockPrices[sym] = null; resolve(); });
     })));
 
-    // ── 3. Crypto via CoinGecko (single request) ──────────────────────────────
-    const COINGECKO_IDS = { BTC: 'bitcoin' }; // extend as needed
+    // ── 3. Crypto via mempool.space (CoinGecko fallback) ──────────────────────
     const cryptoHoldings = holdings.filter(h => h.type === 'crypto');
-    const cryptoPrices = {}; // symbol → priceSEK
-    if (cryptoHoldings.length) {
-      const ids = [...new Set(cryptoHoldings.map(h => COINGECKO_IDS[h.priceSymbol ?? h.symbol]).filter(Boolean))].join(',');
-      if (ids) await new Promise(resolve => {
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=sek`;
-        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
-          let b = ''; r.on('data', c => b += c); r.on('end', () => {
-            try {
-              const data = JSON.parse(b);
-              for (const h of cryptoHoldings) {
-                const id = COINGECKO_IDS[h.priceSymbol ?? h.symbol];
-                if (id && data[id]?.sek) cryptoPrices[h.priceSymbol ?? h.symbol] = data[id].sek;
-              }
-            } catch { /* ignore */ }
-            resolve();
-          });
-        }).on('error', () => resolve());
-      });
-    }
+    const cryptoQuotes = await fetchCryptoQuotes(cryptoHoldings, usdSek);
+    const cryptoPrices = Object.fromEntries(Object.entries(cryptoQuotes).map(([sym, q]) => [sym, q.priceSEK])); // symbol → priceSEK
 
     // ── 4. Forex via Frankfurter ───────────────────────────────────────────────
     const forexHoldings = holdings.filter(h => h.type === 'forex');
@@ -431,31 +489,9 @@ app.get('/api/portfolio', async (req, res) => {
       })));
     }
 
-    // ── 3. Crypto via CoinGecko (price + usd + 24h change, single request) ─────
-    const COINGECKO_IDS = { BTC: 'bitcoin' }; // extend as needed, mirrors frontend
+    // ── 3. Crypto via mempool.space (CoinGecko fallback) ──────────────────────
     const cryptoHoldings = holdings.filter(h => h.type === 'crypto');
-    const cryptoQuotes = {}; // symbol → { priceSEK, priceUSD, change }
-    if (cryptoHoldings.length) {
-      const ids = [...new Set(cryptoHoldings.map(h => COINGECKO_IDS[h.priceSymbol ?? h.symbol]).filter(Boolean))].join(',');
-      if (ids) await new Promise(resolve => {
-        const url = `https://api.coingecko.com/api/v3/simple/price?ids=${ids}&vs_currencies=sek,usd&include_24hr_change=true`;
-        https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0', 'Accept': 'application/json' } }, r => {
-          let b = ''; r.on('data', c => b += c); r.on('end', () => {
-            try {
-              const data = JSON.parse(b);
-              for (const h of cryptoHoldings) {
-                const sym = h.priceSymbol ?? h.symbol;
-                const id  = COINGECKO_IDS[sym];
-                if (id && data[id]) {
-                  cryptoQuotes[sym] = { priceSEK: data[id].sek ?? null, priceUSD: data[id].usd ?? null, change: data[id].sek_24h_change ?? null };
-                }
-              }
-            } catch { /* ignore */ }
-            resolve();
-          });
-        }).on('error', () => resolve());
-      });
-    }
+    const cryptoQuotes = await fetchCryptoQuotes(cryptoHoldings, usdSek); // symbol → { priceSEK, priceUSD, change }
 
     // ── 4. Forex via Frankfurter (no day-change data, mirrors frontend) ────────
     const forexHoldings = holdings.filter(h => h.type === 'forex');
