@@ -1,9 +1,62 @@
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import holdingsData from "../holdings.json";
 
 const FINNHUB_KEY      = ""; // loaded from config.json via /api/config
 const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
 const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:3001`;
+
+// ── What-if exchange rates ──────────────────────────────────────────────────
+// Takes the live prices + user overrides and returns the prices/USD-SEK rate the whole UI should use.
+// Overrides are keyed by rate-row id: "USD_SEK" (any configured fiat pair), "BTC_USD", "BTC_GOLD", "BIGMAC_SATS" (in bits).
+const BTC_RATE_KEYS = ["BTC_USD", "BTC_GOLD", "BIGMAC_SATS"];
+function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK }) {
+  if (!ov || !Object.keys(ov).length) return { prices: live, usdSekRate: liveUsd };
+  const p = { ...live };
+  const patch = (key, extra) => { p[key] = { ...p[key], ...extra }; };
+  const sekOf = sym => sym === "SEK" ? 1 : sym === "BTC" ? live["crypto:BTC"]?.priceSEK : live[`forex:${sym}`]?.priceSEK;
+
+  // 1. Fiat pairs: the "from" currency moves, the "to" currency stays put. Pairs quoted against SEK go first.
+  const newSek = {};
+  const pairs = [...fiatRates].sort((a, b) => (b.to === "SEK") - (a.to === "SEK"));
+  for (const { from, to } of pairs) {
+    const v = ov[`${from}_${to}`];
+    if (v == null) continue;
+    const toSek = newSek[to] ?? sekOf(to);
+    if (toSek > 0) newSek[from] = v * toSek;
+  }
+  const usd = newSek.USD ?? liveUsd;
+
+  // 2. Everything USD-denominated follows USD/SEK
+  if (usd !== liveUsd) {
+    for (const k of Object.keys(p)) {
+      if (k.startsWith("stock:") && p[k]?.priceUSD != null) patch(k, { priceSEK: p[k].priceUSD * usd });
+    }
+  }
+  for (const [sym, v] of Object.entries(newSek)) {
+    if (sym !== "BTC" && sym !== "SEK") patch(`forex:${sym}`, { priceSEK: v });
+  }
+
+  // 3. BTC: a pinned SEK price (Big Mac / BTC-vs-fiat) wins, otherwise a USD price × USD/SEK
+  const btc = live["crypto:BTC"];
+  if (btc) {
+    const gold   = goldUsd;
+    const liveBtcUsd = btc.priceUSD ?? (btc.priceSEK != null ? btc.priceSEK / liveUsd : null);
+    let btcUsd = liveBtcUsd;
+    if (ov.BTC_USD != null) btcUsd = ov.BTC_USD;
+    else if (ov.BTC_GOLD != null && gold > 0) btcUsd = ov.BTC_GOLD * gold;
+    let btcSek = null, pinned = false;
+    if (ov.BIGMAC_SATS > 0) { btcSek = bigMacSEK * 1e8 / (ov.BIGMAC_SATS * 100); pinned = true; }
+    else if (newSek.BTC != null) { btcSek = newSek.BTC; pinned = true; }
+    else if (btcUsd != null && (btcUsd !== liveBtcUsd || usd !== liveUsd)) btcSek = btcUsd * usd;
+    if (btcSek != null) {
+      const extra = { priceSEK: btcSek, priceUSD: pinned ? btcSek / usd : btcUsd };
+      // BTC moving-average lines are SEK-converted at the live rate; keep them comparable when USD/SEK changes
+      if (usd !== liveUsd) for (const k of ["ma200wSEK", "ma200dSEK", "ma50wSEK"]) if (btc[k] != null) extra[k] = btc[k] * usd / liveUsd;
+      patch("crypto:BTC", extra);
+    }
+  }
+  return { prices: p, usdSekRate: usd };
+}
 
 // ── BTC data sources ─────────────────────────────────────────────────────────
 // Spot price: mempool.space (USD) × USD/SEK. History: Binance klines (USD) × daily USD/SEK.
@@ -806,9 +859,9 @@ export default function App() {
     .filter(h => h.type !== "realestate" && h.type !== "debt" && h.type !== "manual")
     .map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
-  const [prices, setPrices]           = useState({});
+  const [livePrices, setPrices] = useState({});
   const [dividends, setDividends]     = useState([]);
-  const [usdSekRate, setUsdSekRate]         = useState(10.35);
+  const [liveUsdSekRate, setUsdSekRate] = useState(10.35);
   const [prevUsdSekRate, setPrevUsdSekRate] = useState(10.35); // yesterday's rate for accurate Day P&L
   const [fetchStatus, setFetchStatus] = useState("idle");
   const [missingPrices, setMissingPrices] = useState(0);
@@ -831,6 +884,18 @@ export default function App() {
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
   const [selectedIndex, setSelectedIndex]     = useState(null); // for market index chart modal
+
+  // What-if rates: overrides sit on top of live data, so the 5-min auto-refresh keeps updating live prices underneath
+  const [rateOverrides, setRateOverrides] = useState({});
+  const [editingRate, setEditingRate]     = useState(null);
+  const [editText, setEditText]           = useState("");
+  const editInitRef   = useRef("");
+  const editCancelRef = useRef(false);
+  const { prices, usdSekRate } = useMemo(
+    () => applyRateOverrides(livePrices, liveUsdSekRate, rateOverrides, { fiatRates, goldUsd: goldUsd ?? goldUsdRef.current, bigMacSEK }),
+    [livePrices, liveUsdSekRate, rateOverrides, fiatRates, goldUsd, bigMacSEK]
+  );
+  const whatIfActive = Object.keys(rateOverrides).length > 0;
 
   useEffect(() => { setTimeout(() => setAnimated(true), 100); }, []);
 
@@ -1472,7 +1537,7 @@ export default function App() {
       return s + (todaySEK - prevSEK) * h.shares;
     }
     // Crypto/forex: change% is already in SEK terms (CoinGecko SEK 24h change)
-    if (h.change != null) return s + (h.priceSEK * h.change / 100) * h.shares;
+    if (h.change != null) return s + ((livePrices[getPriceKey(h)]?.priceSEK ?? h.priceSEK) * h.change / 100) * h.shares; // live price: what-if rates must not distort "today"
     return s;
   }, 0);
   const isLoading    = fetchStatus === "loading";
@@ -1497,6 +1562,10 @@ export default function App() {
   const totalDebt       = debtRows.reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
   const totalManual     = manualRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
   const netWorth        = totalValue + totalRealEstate + totalManual - totalDebt;
+  const liveNetWorth    = whatIfActive
+    ? holdings.reduce((sum, h) => sum + h.shares * (livePrices[getPriceKey(h)]?.priceSEK ?? 0), 0) + totalRealEstate + totalManual - totalDebt
+    : netWorth;
+  const whatIfDelta     = netWorth - liveNetWorth;
 
   // ── Allocation: grouped by category, with positions inside each ─────────────
   // Use costSEK as fallback when live prices haven't loaded yet
@@ -1996,8 +2065,17 @@ export default function App() {
       </div>
 
       <div className="page-inner">
+        {whatIfActive && (
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap", background: "rgba(245,158,11,0.08)", border: "1px solid rgba(245,158,11,0.3)", borderRadius: 12, padding: "9px 14px", marginBottom: 14 }}>
+            <span style={{ fontSize: 12, color: "#f59e0b" }}>
+              <strong>What-if rates active</strong> — net worth {whatIfDelta >= 0 ? "+" : "−"}{fmtSEK(Math.abs(whatIfDelta))}
+              {liveNetWorth > 0 ? ` (${whatIfDelta >= 0 ? "+" : "−"}${Math.abs(whatIfDelta / liveNetWorth * 100).toFixed(2)}%)` : ""} vs live
+            </span>
+            <button onClick={() => { setRateOverrides({}); setEditingRate(null); }} style={{ background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.4)", borderRadius: 8, padding: "4px 12px", color: "#f59e0b", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>↺ Back to live rates</button>
+          </div>
+        )}
         <div className={`metrics-grid fade-in ${animated ? "visible" : ""}`}>
-          <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : "Assets minus debt"} accent="linear-gradient(90deg,#22d3a5,#6366f1)" loading={isLoading && totalValue === 0} />
+          <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub={whatIfActive ? "What-if rates" : missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : "Assets minus debt"} accent={whatIfActive ? "#f59e0b" : "linear-gradient(90deg,#22d3a5,#6366f1)"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " " + dayLabel} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
           <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
@@ -2248,7 +2326,12 @@ export default function App() {
 
             {/* Exchange Rates pane — below Upcoming Dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "210ms" }}>
-              <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", margin: "0 0 14px" }}>
+                <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Exchange Rates</h2>
+                {whatIfActive
+                  ? <button onClick={() => { setRateOverrides({}); setEditingRate(null); }} style={{ background: "none", border: "none", padding: 0, color: "#f59e0b", fontSize: 10, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>↺ Back to live</button>
+                  : <span style={{ fontSize: 10, color: "#374151" }}>click a value to try another rate</span>}
+              </div>
               {(() => {
                 const PAIR_COLORS = ["#38bdf8","#a78bfa","#f59e0b","#34d399","#f472b6","#60a5fa","#fb923c"];
                 const btcSek  = prices["crypto:BTC"]?.priceSEK;
@@ -2272,30 +2355,71 @@ export default function App() {
                     value = rate.toFixed(decimals);
                   }
                   const chartId = `${from}_${to}`;
-                  return { key: chartId.toLowerCase(), label: `${from} / ${to}`, value, chartId, color: PAIR_COLORS[i % PAIR_COLORS.length] };
+                  const raw = fromSek != null && toSek != null && toSek > 0 ? fromSek / toSek : null;
+                  return { key: chartId.toLowerCase(), label: `${from} / ${to}`, value, raw, chartId, color: PAIR_COLORS[i % PAIR_COLORS.length] };
                 });
 
                 const rateRows = [
                   ...fiatRows,
-                  { key: "btc-usd",    label: "BTC / USD",       value: btcUsd     != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", chartId: "BTC_USD",   color: "#f59e0b" },
-                  { key: "btc-gold",   label: "BTC / GOLD",      value: btcGold    != null ? btcGold.toFixed(2) + " oz"  : "—", chartId: "BTC_GOLD",  color: "#fb923c" },
-                  { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacBits != null ? bigMacBits.toFixed(2) + " bits" : "—", chartId: "BIGMAC_SATS", color: "#22d3a5" },
+                  { key: "btc-usd",    label: "BTC / USD",       value: btcUsd     != null ? new Intl.NumberFormat("sv-SE", { maximumFractionDigits: 0 }).format(btcUsd) : "—", raw: btcUsd, chartId: "BTC_USD",   color: "#f59e0b" },
+                  { key: "btc-gold",   label: "BTC / GOLD",      value: btcGold    != null ? btcGold.toFixed(2) + " oz"  : "—", raw: btcGold, chartId: "BTC_GOLD",  color: "#fb923c" },
+                  { key: "bigmac-sats",label: "🍔 Big Mac (SE)", value: bigMacBits != null ? bigMacBits.toFixed(2) + " bits" : "—", raw: bigMacBits, chartId: "BIGMAC_SATS", color: "#22d3a5" },
                 ];
                 return (
                   <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
-                    {rateRows.map(r => (
-                      <div key={r.key} onClick={() => setSelectedRate(r)} className="row-hover"
-                        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: "rgba(255,255,255,0.03)", borderRadius: 8, cursor: "pointer", transition: "background 0.15s" }}>
+                    {rateRows.map(r => {
+                      const isOv      = rateOverrides[r.chartId] != null;
+                      const isEditing = editingRate === r.chartId;
+                      const startEdit = () => {
+                        if (r.raw == null) return;
+                        const init = String(+r.raw.toPrecision(6));
+                        editInitRef.current = init; editCancelRef.current = false;
+                        setEditText(isOv ? String(rateOverrides[r.chartId]) : init);
+                        setEditingRate(r.chartId);
+                      };
+                      const commitEdit = () => {
+                        const cancelled = editCancelRef.current;
+                        editCancelRef.current = false;
+                        setEditingRate(null);
+                        if (cancelled) return;
+                        if (editText.trim() === editInitRef.current) return; // untouched
+                        const n = parseFloat(editText.replace(/[\s\u00a0]/g, "").replace(",", "."));
+                        if (!(n > 0)) return;
+                        setRateOverrides(prev => {
+                          const next = { ...prev, [r.chartId]: n };
+                          if (BTC_RATE_KEYS.includes(r.chartId)) BTC_RATE_KEYS.forEach(k => { if (k !== r.chartId) delete next[k]; }); // BTC rows are alternative views of one price
+                          return next;
+                        });
+                      };
+                      return (
+                      <div key={r.key} onClick={() => { if (!isEditing) setSelectedRate(r); }} className="row-hover"
+                        style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "7px 10px", background: isOv ? "rgba(245,158,11,0.07)" : "rgba(255,255,255,0.03)", borderRadius: 8, cursor: "pointer", transition: "background 0.15s" }}>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                           <div style={{ width: 6, height: 6, borderRadius: "50%", background: r.color, flexShrink: 0 }} />
                           <span style={{ fontSize: 11, color: "#6b7280", letterSpacing: "0.04em" }}>{r.label}</span>
                         </div>
                         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                          <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isLoading && r.value === "—" ? "#374151" : "#d1d5db" }}>{r.value}</span>
+                          {isEditing ? (
+                            <input autoFocus inputMode="decimal" value={editText}
+                              onClick={e => e.stopPropagation()}
+                              onChange={e => setEditText(e.target.value)}
+                              onFocus={e => e.target.select()}
+                              onKeyDown={e => {
+                                if (e.key === "Enter") e.currentTarget.blur();
+                                else if (e.key === "Escape") { editCancelRef.current = true; e.currentTarget.blur(); }
+                              }}
+                              onBlur={commitEdit}
+                              style={{ width: 86, textAlign: "right", background: "rgba(255,255,255,0.08)", border: "1px solid rgba(245,158,11,0.5)", borderRadius: 6, padding: "2px 6px", color: "#f59e0b", fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", outline: "none" }} />
+                          ) : (
+                            <span onClick={e => { e.stopPropagation(); startEdit(); }} title={isOv ? "What-if rate — click to edit" : "Click to try a different rate"}
+                              style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: isOv ? "#f59e0b" : isLoading && r.value === "—" ? "#374151" : "#d1d5db", cursor: r.raw != null ? "text" : "default", borderBottom: r.raw != null ? "1px dashed rgba(255,255,255,0.18)" : "none" }}>{r.value}</span>
+                          )}
+                          {isOv && <span onClick={e => { e.stopPropagation(); setRateOverrides(prev => { const n = { ...prev }; delete n[r.chartId]; return n; }); }} title="Back to live rate" style={{ fontSize: 12, color: "#f59e0b", cursor: "pointer" }}>↺</span>}
                           <span style={{ fontSize: 10, color: "#374151" }}>↗</span>
                         </div>
                       </div>
-                    ))}
+                      );
+                    })}
                   </div>
                 );
               })()}
@@ -2314,10 +2438,10 @@ export default function App() {
 
       {/* Chart modal */}
       {selectedHolding && (
-        <ChartModal holding={selectedHolding} onClose={() => setSelectedHolding(null)} usdSekRate={usdSekRate} prices={prices} />
+        <ChartModal holding={selectedHolding} onClose={() => setSelectedHolding(null)} usdSekRate={liveUsdSekRate} prices={livePrices} />
       )}
       {selectedRate && (
-        <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={prices} usdSekRate={usdSekRate} bigMacSEK={bigMacSEK} />
+        <RateChartModal rate={selectedRate} onClose={() => setSelectedRate(null)} goldUsd={goldUsd} prices={livePrices} usdSekRate={liveUsdSekRate} bigMacSEK={bigMacSEK} />
       )}
       {selectedIndex && (
         <IndexChartModal index={selectedIndex} onClose={() => setSelectedIndex(null)} />
