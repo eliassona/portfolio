@@ -10,6 +10,76 @@ const PORT = 3001;
 app.use(cors());
 app.use(express.json());
 
+// ── Shared upstream cache ───────────────────────────────────────────────────
+// Every market-data proxy goes through here: identical requests are de-duplicated while in flight,
+// cached for a short TTL, time out after 8s, and fall back to the last good response (up to 6h old)
+// when the upstream errors or rate-limits (e.g. Yahoo 429) — instead of handing the UI garbage.
+const upstreamCache = new Map();   // url → { status, body, at }
+const upstreamInflight = new Map(); // url → Promise
+const STALE_MS = 6 * 3600 * 1000;
+
+function fetchUpstream(url, headers = {}, timeoutMs = 8000) {
+  return new Promise((resolve, reject) => {
+    const req = https.get(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36', 'Accept': 'application/json,text/plain,*/*', 'Accept-Language': 'en-US,en;q=0.9', ...headers } }, (r) => {
+      let body = '';
+      r.on('data', c => { body += c; });
+      r.on('end', () => resolve({ status: r.statusCode, body }));
+    });
+    req.setTimeout(timeoutMs, () => req.destroy(new Error(`timeout after ${timeoutMs}ms`)));
+    req.on('error', reject);
+  });
+}
+
+async function cachedUpstream(url, ttlMs, headers) {
+  const hit = upstreamCache.get(url);
+  if (hit && Date.now() - hit.at < ttlMs) return hit;
+  if (upstreamInflight.has(url)) return upstreamInflight.get(url);
+  const job = (async () => {
+    try {
+      const r = await fetchUpstream(url, headers);
+      if (r.status === 200) {
+        upstreamCache.set(url, { ...r, at: Date.now() });
+        if (upstreamCache.size > 600) upstreamCache.delete(upstreamCache.keys().next().value);
+        return r;
+      }
+      if (hit && Date.now() - hit.at < STALE_MS) { console.warn(`upstream ${r.status} for ${url} — serving cached copy`); return { ...hit, stale: true }; }
+      console.error(`upstream ${r.status} for ${url}: ${r.body.slice(0, 120)}`);
+      return r;
+    } catch (err) {
+      if (hit && Date.now() - hit.at < STALE_MS) { console.warn(`upstream error for ${url} (${err.message}) — serving cached copy`); return { ...hit, stale: true }; }
+      throw err;
+    } finally {
+      upstreamInflight.delete(url);
+    }
+  })();
+  upstreamInflight.set(url, job);
+  return job;
+}
+
+async function proxyUpstream(res, url, ttlMs, headers, altUrl) {
+  try {
+    let r = null;
+    try { r = await cachedUpstream(url, ttlMs, headers); } catch (e) { if (!altUrl) throw e; }
+    if ((!r || r.status !== 200) && altUrl) { // e.g. Yahoo query2 blocked → try query1
+      try { const r2 = await cachedUpstream(altUrl, ttlMs, headers); if (!r || r2.status === 200) r = r2; } catch (e) { if (!r) throw e; }
+    }
+    res.setHeader('Content-Type', 'application/json');
+    if (r.stale) res.setHeader('X-Cache', 'stale');
+    res.status(r.status).send(r.body);
+  } catch (err) {
+    console.error('proxy error:', url, err.message);
+    res.status(502).json({ error: err.message });
+  }
+}
+
+function yahooTtl(range, interval, events) {
+  if (events) return 6 * 3600 * 1000;                         // dividend history
+  if (['1d', '5d'].includes(range)) return 30 * 1000;         // live-ish quotes
+  if (['1mo', '3mo', 'ytd'].includes(range)) return 60 * 1000;
+  if (['6mo', '1y'].includes(range)) return 5 * 60 * 1000;
+  return 15 * 60 * 1000;                                      // 2y / 5y / max (moving averages)
+}
+
 function loadConfig() {
   try {
     return JSON.parse(readFileSync('./config.json', 'utf8'));
@@ -95,26 +165,9 @@ app.get('/api/yahoo', (req, res) => {
   if (!symbol) return res.status(400).json({ error: 'symbol required' });
   const eventsParam = events ? `&events=${events}` : '';
   const url = `https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(symbol)}?range=${range}&interval=${interval}&includePrePost=false${eventsParam}`;
-  const options = {
-    headers: {
-      'User-Agent': 'Mozilla/5.0',
-      'Accept': 'application/json',
-    }
-  };
-  https.get(url, options, (yahooRes) => {
-    let body = '';
-    yahooRes.on('data', chunk => { body += chunk; });
-    yahooRes.on('end', () => {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(yahooRes.statusCode).send(body);
-    });
-  }).on('error', err => {
-    console.error('Yahoo proxy error:', err.message);
-    res.status(500).json({ error: err.message });
-  });
+  proxyUpstream(res, url, yahooTtl(range, interval, events), undefined, url.replace('query2.', 'query1.'));
 });
 
-// Config endpoint — exposes non-sensitive display settings to the frontend
 app.get('/api/config', (req, res) => {
   const config = loadConfig();
   res.json({
@@ -125,23 +178,13 @@ app.get('/api/config', (req, res) => {
   });
 });
 
-// Frankfurter proxy — avoids CORS issues from browser
+// Frankfurter proxy — avoids CORS issues from browser (ECB rates change once a day → 1h cache)
 app.get('/api/frankfurter', (req, res) => {
   // "endpoint" = latest/currencies, "range" = date range like 2026-01-01..2026-04-04
   const { endpoint, range, path: _path, ...params } = req.query;
   const fPath = (range ?? endpoint ?? 'latest').replace(/__/g, '..');
   const qs = Object.entries(params).map(([k,v]) => `${k}=${v}`).join('&');
-  const url = `https://api.frankfurter.app/${fPath}${qs ? '?' + qs : ''}`;
-  console.log('Frankfurter URL:', url);
-  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
-  https.get(url, options, (fRes) => {
-    let body = '';
-    fRes.on('data', chunk => { body += chunk; });
-    fRes.on('end', () => {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(fRes.statusCode).send(body);
-    });
-  }).on('error', err => res.status(500).json({ error: err.message }));
+  proxyUpstream(res, `https://api.frankfurter.app/${fPath}${qs ? '?' + qs : ''}`, 3600 * 1000);
 });
 
 // CoinGecko proxy — avoids CORS and rate limit issues from browser
@@ -152,22 +195,10 @@ app.get('/api/coingecko', (req, res) => {
     .filter(([k]) => k !== 'path')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
-  const url = `https://api.coingecko.com/api/v3/${path}${qs ? '?' + qs : ''}`;
-  const options = { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } };
-  https.get(url, options, (cgRes) => {
-    let body = '';
-    cgRes.on('data', chunk => { body += chunk; });
-    cgRes.on('end', () => {
-      res.setHeader('Content-Type', 'application/json');
-      res.status(cgRes.statusCode).send(body);
-    });
-  }).on('error', err => {
-    res.status(500).json({ error: err.message });
-  });
+  proxyUpstream(res, `https://api.coingecko.com/api/v3/${path}${qs ? '?' + qs : ''}`, path.includes('market_chart') ? 10 * 60 * 1000 : 60 * 1000);
 });
 
-
-// mempool.space proxy — same pattern as /api/coingecko. Usage: /api/mempool?path=v1/prices
+// mempool.space proxy — same pattern. Usage: /api/mempool?path=v1/prices
 app.get('/api/mempool', (req, res) => {
   const path = req.query.path;
   if (!path) return res.status(400).json({ error: 'path required' });
@@ -175,19 +206,7 @@ app.get('/api/mempool', (req, res) => {
     .filter(([k]) => k !== 'path')
     .map(([k, v]) => `${encodeURIComponent(k)}=${encodeURIComponent(v)}`)
     .join('&');
-  const url = `https://mempool.space/api/${path}${qs ? '?' + qs : ''}`;
-  https.get(url, { headers: { 'Accept': 'application/json', 'User-Agent': 'Mozilla/5.0' } }, (mRes) => {
-    let body = '';
-    mRes.on('data', chunk => { body += chunk; });
-    mRes.on('end', () => {
-      if (mRes.statusCode !== 200) console.error('mempool proxy', mRes.statusCode, body.slice(0, 200));
-      res.setHeader('Content-Type', 'application/json');
-      res.status(mRes.statusCode).send(body);
-    });
-  }).on('error', err => {
-    console.error('mempool proxy error:', err.message);
-    res.status(500).json({ error: err.message });
-  });
+  proxyUpstream(res, `https://mempool.space/api/${path}${qs ? '?' + qs : ''}`, path.includes('historical') ? 10 * 60 * 1000 : 30 * 1000);
 });
 
 // Elprisetjustnu proxy — fetches Nord Pool spot prices for SE3 (or any area), no auth required

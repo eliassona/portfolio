@@ -58,25 +58,36 @@ function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK }
   return { prices: p, usdSekRate: usd };
 }
 
+// fetch with a timeout, so one hanging request can never stall the whole refresh
+async function fetchT(url, ms = 8000, opts = {}) {
+  const c = new AbortController();
+  const t = setTimeout(() => c.abort(), ms);
+  try { return await fetch(url, { ...opts, signal: c.signal }); } finally { clearTimeout(t); }
+}
+// run fn over items with at most `limit` in flight
+async function mapPool(items, limit, fn) {
+  const queue = [...items];
+  await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, async () => {
+    while (queue.length) await fn(queue.shift());
+  }));
+}
+
 // ── BTC data sources ─────────────────────────────────────────────────────────
 // Spot price: mempool.space (USD) × USD/SEK. History: Binance klines (USD) × daily USD/SEK.
 // Other coins (if ever added to COINGECKO_IDS) still go through the CoinGecko proxy.
 async function mempoolBtcSpot(usdSek) {
-  const res = await fetch(`${ALERT_SERVER}/api/mempool?path=v1/prices`);
-  if (!res.ok) throw new Error(`mempool prices ${res.status}`);
-  const now = await res.json();
-  const priceUSD = now?.USD;
+  const ts = Math.floor(Date.now() / 1000) - 86400;
+  const [nowR, histR] = await Promise.allSettled([
+    fetchT(`${ALERT_SERVER}/api/mempool?path=v1/prices`, 8000),
+    fetchT(`${ALERT_SERVER}/api/mempool?path=v1/historical-price&currency=USD&timestamp=${ts}`, 8000),
+  ]);
+  if (nowR.status !== "fulfilled" || !nowR.value.ok) throw new Error(`mempool prices ${nowR.status === "fulfilled" ? nowR.value.status : nowR.reason?.message}`);
+  const priceUSD = (await nowR.value.json())?.USD;
   if (!(priceUSD > 0)) return null;
-  // 24h change: mempool.space historical price, falling back to Binance 24h-old candle
+  // 24h change: mempool.space price from 24h ago, falling back to a Binance candle
   let prev = null;
-  try {
-    const ts = Math.floor(Date.now() / 1000) - 86400;
-    const hRes = await fetch(`${ALERT_SERVER}/api/mempool?path=v1/historical-price&currency=USD&timestamp=${ts}`);
-    if (hRes.ok) prev = (await hRes.json())?.prices?.[0]?.USD ?? null;
-  } catch { /* fall through */ }
-  if (!(prev > 0)) {
-    try { prev = (await binanceBtcUSD(1))?.[0]?.[1] ?? null; } catch { /* no change available */ }
-  }
+  try { if (histR.status === "fulfilled" && histR.value.ok) prev = (await histR.value.json())?.prices?.[0]?.USD ?? null; } catch { /* fall through */ }
+  if (!(prev > 0)) { try { prev = (await binanceBtcUSD(1))?.[0]?.[1] ?? null; } catch { /* no change available */ } }
   const change = prev > 0 ? ((priceUSD - prev) / prev) * 100 : null;
   return { priceUSD, priceSEK: priceUSD * usdSek, change };
 }
@@ -87,7 +98,7 @@ async function binanceBtcUSD(days) {
   else if (days <= 7)  { interval = "1h";  limit = days * 24; }
   else if (days <= 90) { interval = "4h";  limit = days * 6; }
   else                 { interval = "1d";  limit = Math.min(days, 1000); }
-  const res = await fetch(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`);
+  const res = await fetchT(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 10000);
   if (!res.ok) throw new Error(`Binance ${res.status}`);
   const k = await res.json();
   return k.map(c => [c[0], parseFloat(c[4])]);
@@ -96,7 +107,7 @@ async function binanceBtcUSD(days) {
 async function usdSekDailyMap() {
   const map = {};
   try {
-    const res = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=SEK%3DX&range=2y&interval=1d`);
+    const res = await fetchT(`${ALERT_SERVER}/api/yahoo?symbol=SEK%3DX&range=2y&interval=1d`, 10000);
     const r   = (await res.json())?.chart?.result?.[0];
     const cl  = r?.indicators?.quote?.[0]?.close ?? [];
     (r?.timestamp ?? []).forEach((t, i) => { if (cl[i] != null) map[new Date(t * 1000).toISOString().slice(0, 10)] = cl[i]; });
@@ -105,7 +116,7 @@ async function usdSekDailyMap() {
 }
 
 // Drop-in replacement for the old CoinGecko market_chart call → { prices: [[t, v], ...] }
-async function marketChart(coinId, vs, days, fallbackRate = 10.5) {
+async function marketChart(coinId, vs, days, fallbackRate = 10.5, flatRate = false) {
   if (coinId !== "bitcoin") {
     const res = await fetch(`${ALERT_SERVER}/api/coingecko?path=coins/${coinId}/market_chart&vs_currency=${vs}&days=${days}`);
     if (res.status === 429) throw new Error("CoinGecko rate limit — wait a moment and try again");
@@ -113,7 +124,7 @@ async function marketChart(coinId, vs, days, fallbackRate = 10.5) {
   }
   const usd = await binanceBtcUSD(days);
   if (vs === "usd") return { prices: usd };
-  const fx = await usdSekDailyMap();
+  const fx = flatRate ? {} : await usdSekDailyMap(); // flatRate: skip the extra Yahoo call (used for the tiny sparkline)
   return { prices: usd.map(([t, v]) => [t, v * (fx[new Date(t).toISOString().slice(0, 10)] ?? fallbackRate)]) };
 }
 const ALERT_THRESHOLD  = 5; // percent — also set in config.json on the server
@@ -871,6 +882,7 @@ export default function App() {
   const [selectedHolding, setSelectedHolding] = useState(null); // for chart modal
   const [indexes, setIndexes]                 = useState([]);
   const [goldUsd, setGoldUsd]                 = useState(null);
+  const lastUsdSekRef                         = useRef(null); // last good live USD/SEK, reused if every source fails
   const goldUsdRef                            = useRef(null); // ref so fetchAll closure always reads latest value
   const fiatSymbolsRef                        = useRef([]);   // fiat pair symbols from config, always available to fetchAll
   const ma200wSEKRef                          = useRef(null); // BTC 200W MA — cached so we only fetch the long history once
@@ -978,8 +990,8 @@ export default function App() {
     return res.json();
   };
 
-  // Fetch all crypto prices in ONE request, then history per coin with delays
-  const fetchAllCrypto = async (symbols, usdSek) => {
+  // Crypto: spot prices first (reported immediately via onSpot), then sparkline + moving averages in parallel
+  const fetchAllCrypto = async (symbols, usdSek, onSpot) => {
     const entries = symbols.map(sym => ({ sym, id: COINGECKO_IDS[sym] })).filter(e => e.id);
     if (!entries.length) return {};
     let priceData = {};
@@ -1003,7 +1015,6 @@ export default function App() {
         } catch { /* both sources failed */ }
       }
     }
-    // History per coin sequentially with delay
     const results = {};
     for (const { sym, id } of entries) {
       results[`crypto:${sym}`] = {
@@ -1015,81 +1026,35 @@ export default function App() {
         ma200dSEK:  sym === "BTC" ? ma200dSEKRef.current : undefined,
         ma50wSEK:   sym === "BTC" ? ma50wSEKRef.current  : undefined,
       };
-      if (sym !== "BTC") await new Promise(r => setTimeout(r, 2000)); // CoinGecko rate-limit spacing
+    }
+    onSpot?.({ ...results });
 
-      // 30-day sparkline (BTC via Binance, others via CoinGecko)
+    // BTC moving averages via Binance public klines — fetched once per session, cached in refs
+    const maJob = async (r, ref, field, interval, limit) => {
+      if (ref.current != null || !(usdSek > 0)) return;
       try {
-        const historyData = sym === "BTC"
-          ? await marketChart("bitcoin", "sek", 30, usdSek)
-          : await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
-        if (historyData?.prices) results[`crypto:${sym}`].historySEK = historyData.prices.map(([, p]) => p);
-      } catch { /* sparkline unavailable */ }
-
-      // BTC 200W MA via Binance public klines — only fetch once per session, cached in ref
-      if (sym === "BTC" && ma200wSEKRef.current == null) {
+        const klRes = await fetchT(`https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=${interval}&limit=${limit}`, 10000);
+        if (!klRes.ok) return;
+        const closes = (await klRes.json()).map(k => parseFloat(k[4]));
+        ref.current = (closes.reduce((a, b) => a + b, 0) / closes.length) * usdSek;
+        r[field] = ref.current;
+      } catch { /* MA unavailable */ }
+    };
+    for (const { sym, id } of entries) {
+      const r = results[`crypto:${sym}`];
+      const jobs = [(async () => {
         try {
-          // Binance: 200 weekly BTCUSDT candles (no auth, no proxy needed)
-          const usdSek = priceData?.["tether"]?.sek ?? priceData?.["usd-coin"]?.sek ?? null;
-          const klRes  = await fetch(
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=200"
-          );
-          if (klRes.ok) {
-            const klines = await klRes.json();
-            // Each kline: [openTime, open, high, low, close, ...]
-            const closes = klines.map(k => parseFloat(k[4]));
-            const avgUsd = closes.reduce((a, b) => a + b, 0) / closes.length;
-            // Convert to SEK using latest USD/SEK rate from CoinGecko price response
-            const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
-            if (usdSekRate > 0) {
-              ma200wSEKRef.current = avgUsd * usdSekRate;
-              results[`crypto:${sym}`].ma200wSEK = ma200wSEKRef.current;
-            }
-          }
-        } catch { /* 200W MA unavailable */ }
-      }
-
-      // BTC 200D MA via Binance public klines — only fetch once per session, cached in ref
-      if (sym === "BTC" && ma200dSEKRef.current == null) {
-        try {
-          // Binance: 200 daily BTCUSDT candles (no auth, no proxy needed)
-          const klRes = await fetch(
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1d&limit=200"
-          );
-          if (klRes.ok) {
-            const klines = await klRes.json();
-            // Each kline: [openTime, open, high, low, close, ...]
-            const closes = klines.map(k => parseFloat(k[4]));
-            const avgUsd = closes.reduce((a, b) => a + b, 0) / closes.length;
-            // Convert to SEK using latest USD/SEK rate from CoinGecko price response
-            const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
-            if (usdSekRate > 0) {
-              ma200dSEKRef.current = avgUsd * usdSekRate;
-              results[`crypto:${sym}`].ma200dSEK = ma200dSEKRef.current;
-            }
-          }
-        } catch { /* 200D MA unavailable */ }
-      }
-      // BTC 50W MA via Binance public klines — only fetch once per session, cached in ref
-      if (sym === "BTC" && ma50wSEKRef.current == null) {
-        try {
-          // Binance: 50 weekly BTCUSDT candles (no auth, no proxy needed)
-          const klRes = await fetch(
-            "https://api.binance.com/api/v3/klines?symbol=BTCUSDT&interval=1w&limit=50"
-          );
-          if (klRes.ok) {
-            const klines = await klRes.json();
-            // Each kline: [openTime, open, high, low, close, ...]
-            const closes = klines.map(k => parseFloat(k[4]));
-            const avgUsd = closes.reduce((a, b) => a + b, 0) / closes.length;
-            // Convert to SEK using latest USD/SEK rate from CoinGecko price response
-            const usdSekRate = priceData?.["bitcoin"]?.sek / priceData?.["bitcoin"]?.usd;
-            if (usdSekRate > 0) {
-              ma50wSEKRef.current = avgUsd * usdSekRate;
-              results[`crypto:${sym}`].ma50wSEK = ma50wSEKRef.current;
-            }
-          }
-        } catch { /* 50W MA unavailable */ }
-      }
+          const h = sym === "BTC" ? await marketChart("bitcoin", "sek", 30, usdSek, true) : await cgFetch(`coins/${id}/market_chart`, { vs_currency: "sek", days: 30 });
+          if (h?.prices) r.historySEK = h.prices.map(([, p]) => p);
+        } catch { /* sparkline unavailable */ }
+      })()];
+      if (sym === "BTC") jobs.push(
+        maJob(r, ma200wSEKRef, "ma200wSEK", "1w", 200),
+        maJob(r, ma200dSEKRef, "ma200dSEK", "1d", 200),
+        maJob(r, ma50wSEKRef,  "ma50wSEK",  "1w", 50),
+      );
+      await Promise.all(jobs);
+      if (sym !== "BTC") await new Promise(r => setTimeout(r, 2000)); // CoinGecko rate-limit spacing
     }
     return results;
   };
@@ -1099,37 +1064,51 @@ export default function App() {
     if (!symbols.length) return {};
     const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
     const results = {};
-    for (const sym of symbols) {
-      if (sym === "SEK") { results[sym] = { priceSEK: 1, change: null, historySEK: null }; continue; }
+    await Promise.all(symbols.map(async sym => {
+      if (sym === "SEK") { results[sym] = { priceSEK: 1, change: null, historySEK: null }; return; }
       try {
         // Yahoo Finance forex symbol format: JPYSEK=X, EURSEK=X, CHFSEK=X etc.
         const yahooSym = sym === "USD" ? "SEK=X" : `${sym}SEK=X`;
-        const res  = await fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(yahooSym)}&range=1mo&interval=1d`);
+        const res  = await fetchT(`${srv}/api/yahoo?symbol=${encodeURIComponent(yahooSym)}&range=1mo&interval=1d`);
         const json = await res.json();
         const result = json?.chart?.result?.[0];
         const closes = result?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
-        const priceSEK = closes.length > 0 ? closes[closes.length - 1] : null;
+        const live   = result?.meta?.regularMarketPrice;
+        const priceSEK = live > 0 ? live : closes.length > 0 ? closes[closes.length - 1] : null;
         const historySEK = closes.length > 1 ? closes : null;
         results[sym] = { priceSEK, change: null, historySEK };
       } catch {
         results[sym] = { priceSEK: null, change: null, historySEK: null };
       }
-      await new Promise(r => setTimeout(r, 300));
-    }
+      if (!(results[sym].priceSEK > 0)) { // Yahoo failed → ECB rate from Frankfurter beats showing nothing
+        try {
+          const fr = await fetchT(`${srv}/api/frankfurter?endpoint=latest&from=${sym}&to=SEK`);
+          const v  = (await fr.json())?.rates?.SEK;
+          if (v > 0) { results[sym].priceSEK = v; console.warn(`${sym}/SEK from Frankfurter fallback:`, v); }
+        } catch { /* leave null */ }
+      }
+    }));
     return results;
   };
 
-  // ── USD/SEK via Yahoo Finance (real-time) + yesterday via Frankfurter ───
   const fetchUsdSek = async () => {
-    // Today: Yahoo Finance real-time
-    let today = 10.35;
+    let today = null;
     try {
-      const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
-      const res    = await fetch(`${alertServer}/api/yahoo?symbol=SEK%3DX&range=5d&interval=1d`);
-      const json   = await res.json();
-      const closes = json?.chart?.result?.[0]?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
-      if (closes.length > 0) today = closes[closes.length - 1];
-    } catch { /* fall through to Frankfurter */ }
+      const res  = await fetchT(`${ALERT_SERVER}/api/yahoo?symbol=SEK%3DX&range=5d&interval=1d`);
+      const r    = (await res.json())?.chart?.result?.[0];
+      const live = r?.meta?.regularMarketPrice; // live quote; the last daily bar can lag
+      const closes = r?.indicators?.quote?.[0]?.close?.filter(v => v != null) ?? [];
+      today = live > 0 ? live : closes.length ? closes[closes.length - 1] : null;
+    } catch (e) { console.warn("Yahoo USD/SEK failed:", e.message); }
+    if (!(today > 0)) { // fallback 1: Frankfurter (ECB, once a day — but a real rate)
+      try {
+        const res = await fetchT(`${ALERT_SERVER}/api/frankfurter?endpoint=latest&from=USD&to=SEK`);
+        today = (await res.json())?.rates?.SEK ?? null;
+        if (today > 0) console.warn("USD/SEK from Frankfurter fallback:", today);
+      } catch { /* next fallback */ }
+    }
+    if (today > 0) lastUsdSekRef.current = today;
+    else { today = lastUsdSekRef.current ?? 10.35; console.warn("USD/SEK unavailable — reusing", today); } // last known good rate
     // Use today as yesterday fallback — close enough for Day P&L purposes
     return { today, yesterday: today };
   };
@@ -1145,10 +1124,10 @@ export default function App() {
     const symbolsWithData = new Set();
     const results = [];
 
-    for (const sym of stockSymbols) {
+    await mapPool(stockSymbols, 4, async (sym) => {
       try {
         // Fetch 3 months to catch upcoming ex-dividend dates
-        const res  = await fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=3mo&interval=1d&events=div`);
+        const res  = await fetchT(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=3mo&interval=1d&events=div`);
         const json = await res.json();
         const divEvents = json?.chart?.result?.[0]?.events?.dividends ?? {};
         const todayTs   = Math.floor(today.getTime() / 1000);
@@ -1161,8 +1140,7 @@ export default function App() {
           }
         }
       } catch { /* skip */ }
-      await new Promise(r => setTimeout(r, 150));
-    }
+    });
 
     // For symbols with no Finnhub data, check if holdings.json has manual dividend info.
     // dividendFrequency: "monthly" | "quarterly" | "biweekly" — we show it if a payment falls in the next 30 days.
@@ -1252,7 +1230,7 @@ export default function App() {
 
       const results = {};
 
-      for (const key of uniqueStockKeys) {
+      await mapPool(uniqueStockKeys, 4, async (key) => {
         const sym = key.replace(/^stock:/, "");
         try {
           const { priceUSD, prevUSD, change, historyUSD, asOf } = await fetchStock(sym);
@@ -1267,17 +1245,7 @@ export default function App() {
         } catch {
           results[key] = { priceSEK: null, change: null, historySEK: null, asOf: null };
         }
-        await new Promise(r => setTimeout(r, 250));
-      }
-
-      // Fetch all crypto in one batched price call + sequential history
-      const cryptoSyms = uniqueCryptoKeys.map(k => k.replace(/^crypto:/, ""));
-      try {
-        const cryptoResults = await fetchAllCrypto(cryptoSyms, usdSek);
-        Object.assign(results, cryptoResults);
-      } catch {
-        uniqueCryptoKeys.forEach(key => { results[key] = { priceSEK: null, change: null, historySEK: null }; });
-      }
+      });
 
       for (const key of uniqueForexKeys) {
         const sym = key.replace(/^forex:/, "");
@@ -1294,6 +1262,17 @@ export default function App() {
       }
       // Patch USD price with the real-time Yahoo rate (Frankfurter is ECB, updated once/day)
       if (results["forex:USD"]) results["forex:USD"].priceSEK = usdSek;
+
+      setPrices(prev => ({ ...prev, ...results })); // show stocks + FX right away; BTC fills in below
+
+      // Fetch all crypto in one batched price call + sequential history
+      const cryptoSyms = uniqueCryptoKeys.map(k => k.replace(/^crypto:/, ""));
+      try {
+        const cryptoResults = await fetchAllCrypto(cryptoSyms, usdSek, spot => setPrices(prev => ({ ...prev, ...spot })));
+        Object.assign(results, cryptoResults);
+      } catch {
+        uniqueCryptoKeys.forEach(key => { results[key] = { priceSEK: null, change: null, historySEK: null }; });
+      }
 
       // Count holdings with missing prices for the warning indicator
       const missingCount = holdings.filter(h => {
