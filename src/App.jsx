@@ -9,8 +9,21 @@ const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostnam
 // Takes the live prices + user overrides and returns the prices/USD-SEK rate the whole UI should use.
 // Overrides are keyed by rate-row id: "USD_SEK" (any configured fiat pair), "BTC_USD", "BTC_GOLD", "BIGMAC_SATS" (in bits).
 const BTC_RATE_KEYS = ["BTC_USD", "BTC_GOLD", "BIGMAC_SATS"];
-function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK }) {
-  if (!ov || !Object.keys(ov).length) return { prices: live, usdSekRate: liveUsd };
+// Stocks that follow a simulated BTC/USD move: ticker → multiplier of BTC's % change (matched on symbol or priceSymbol, exchange suffix ignored)
+const BTC_PROXIES = { GBTC: 1, BTC2: 1, MSTR: 2 };
+function btcBetaByKey(holdings) {
+  const map = {};
+  for (const h of holdings ?? []) {
+    if (h.type !== "stock") continue;
+    for (const raw of [h.symbol, h.priceSymbol]) {
+      const t = raw?.split(":").pop().split(".")[0].toUpperCase();
+      if (t && BTC_PROXIES[t] != null) { map[getPriceKey(h)] = BTC_PROXIES[t]; break; }
+    }
+  }
+  return map;
+}
+function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK, betaByKey = {} }) {
+  if (!ov || !Object.keys(ov).length) return { prices: live, usdSekRate: liveUsd, btcPct: null };
   const p = { ...live };
   const patch = (key, extra) => { p[key] = { ...p[key], ...extra }; };
   const sekOf = sym => sym === "SEK" ? 1 : sym === "BTC" ? live["crypto:BTC"]?.priceSEK : live[`forex:${sym}`]?.priceSEK;
@@ -36,6 +49,7 @@ function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK }
     if (sym !== "BTC" && sym !== "SEK") patch(`forex:${sym}`, { priceSEK: v });
   }
 
+  let btcPct = null;
   // 3. BTC: a pinned SEK price (Big Mac / BTC-vs-fiat) wins, otherwise a USD price × USD/SEK
   const btc = live["crypto:BTC"];
   if (btc) {
@@ -53,9 +67,20 @@ function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK }
       // BTC moving-average lines are SEK-converted at the live rate; keep them comparable when USD/SEK changes
       if (usd !== liveUsd) for (const k of ["ma200wSEK", "ma200dSEK", "ma50wSEK"]) if (btc[k] != null) extra[k] = btc[k] * usd / liveUsd;
       patch("crypto:BTC", extra);
+      btcPct = liveBtcUsd > 0 ? extra.priceUSD / liveBtcUsd - 1 : null;
     }
   }
-  return { prices: p, usdSekRate: usd };
+
+  // 4. BTC proxies (GBTC, BTC2, MSTR…) move by beta × the simulated BTC/USD % change, on top of any USD/SEK effect
+  if (btcPct != null && Math.abs(btcPct) > 1e-9) {
+    for (const [key, beta] of Object.entries(betaByKey)) {
+      const q = p[key];
+      if (!q || q.priceSEK == null) continue;
+      const factor = Math.max(0, 1 + beta * btcPct); // a 2x proxy can't go below zero
+      patch(key, { priceSEK: q.priceSEK * factor, priceUSD: q.priceUSD != null ? q.priceUSD * factor : q.priceUSD });
+    }
+  } else btcPct = null;
+  return { prices: p, usdSekRate: usd, btcPct };
 }
 
 // fetch with a timeout, so one hanging request can never stall the whole refresh
@@ -903,9 +928,10 @@ export default function App() {
   const [editText, setEditText]           = useState("");
   const editInitRef   = useRef("");
   const editCancelRef = useRef(false);
-  const { prices, usdSekRate } = useMemo(
-    () => applyRateOverrides(livePrices, liveUsdSekRate, rateOverrides, { fiatRates, goldUsd: goldUsd ?? goldUsdRef.current, bigMacSEK }),
-    [livePrices, liveUsdSekRate, rateOverrides, fiatRates, goldUsd, bigMacSEK]
+  const betaByKey = useMemo(() => btcBetaByKey(holdings), [holdings]);
+  const { prices, usdSekRate, btcPct } = useMemo(
+    () => applyRateOverrides(livePrices, liveUsdSekRate, rateOverrides, { fiatRates, goldUsd: goldUsd ?? goldUsdRef.current, bigMacSEK, betaByKey }),
+    [livePrices, liveUsdSekRate, rateOverrides, fiatRates, goldUsd, bigMacSEK, betaByKey]
   );
   const whatIfActive = Object.keys(rateOverrides).length > 0;
 
@@ -2049,6 +2075,12 @@ export default function App() {
             <span style={{ fontSize: 12, color: "#f59e0b" }}>
               <strong>What-if rates active</strong> — net worth {whatIfDelta >= 0 ? "+" : "−"}{fmtSEK(Math.abs(whatIfDelta))}
               {liveNetWorth > 0 ? ` (${whatIfDelta >= 0 ? "+" : "−"}${Math.abs(whatIfDelta / liveNetWorth * 100).toFixed(2)}%)` : ""} vs live
+            {btcPct != null && Object.keys(betaByKey).length > 0 && (
+                <span style={{ display: "block", marginTop: 3, fontSize: 11, opacity: 0.85 }}>
+                  BTC/USD {btcPct >= 0 ? "+" : "−"}{Math.abs(btcPct * 100).toFixed(1)}% vs live →{" "}
+                  {Object.entries(betaByKey).map(([k, b]) => `${k.replace(/^stock:/, "")} ${b * btcPct >= 0 ? "+" : "−"}${Math.min(Math.abs(b * btcPct), 1) * 100 >= 100 && b * btcPct < 0 ? "100" : Math.abs(b * btcPct * 100).toFixed(1)}%`).join(", ")}
+                </span>
+              )}
             </span>
             <button onClick={() => { setRateOverrides({}); setEditingRate(null); }} style={{ background: "rgba(245,158,11,0.15)", border: "1px solid rgba(245,158,11,0.4)", borderRadius: 8, padding: "4px 12px", color: "#f59e0b", fontSize: 11, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>↺ Back to live rates</button>
           </div>
