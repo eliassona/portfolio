@@ -1,9 +1,11 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from "react";
-import holdingsData from "../holdings.json";
+import holdingsData from "@holdings"; // aliased in vite.config.js (HOLDINGS_FILE env, default holdings.json)
+
+const API_PORT = __API_PORT__; // injected by vite.config.js (API_PORT env, default 3001)
 
 const FINNHUB_KEY      = ""; // loaded from config.json via /api/config
 const REFRESH_MS       = 5 * 60 * 1000; // 5 minutes
-const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:3001`;
+const ALERT_SERVER     = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
 
 // ── What-if exchange rates ──────────────────────────────────────────────────
 // Takes the live prices + user overrides and returns the prices/USD-SEK rate the whole UI should use.
@@ -292,7 +294,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else if (timeframe === "YTD") { range = "ytd"; interval = "1d";  }
         else if (timeframe === "1Y")  { range = "1y";  interval = "1wk"; }
         else                          { range = "5y";  interval = "1wk"; }
-        const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+        const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
         // Fetch stock prices and historical USD/SEK in parallel for accurate point-by-point conversion
         const [res, fxRes] = await Promise.all([
           fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`),
@@ -346,7 +348,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else                          startDate = new Date(now - 365*86400000);
         const from = startDate.toISOString().slice(0,10);
         const to   = now.toISOString().slice(0,10);
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?range=${from}__${to}&from=${sym}&to=SEK`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:${API_PORT}/api/frankfurter?range=${from}__${to}&from=${sym}&to=SEK`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -375,7 +377,7 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
     try {
       let daily = [], weekly = [];
       if (type === "stock") {
-        const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+        const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
         const [dRes, wRes, fxDRes, fxWRes] = await Promise.all([
           fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=2y&interval=1d`),
           fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=max&interval=1wk`),
@@ -604,7 +606,7 @@ function RateChartModal({ rate, onClose, goldUsd, prices, usdSekRate, bigMacSEK 
         else                          startDate = new Date(now - 365*86400000);
         const fromDate = startDate.toISOString().slice(0,10);
         const toDate   = now.toISOString().slice(0,10);
-        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:3001/api/frankfurter?range=${fromDate}__${toDate}&from=${fromSym}&to=${toSym}`);
+        const res  = await fetch(`${window.location.protocol}//${window.location.hostname}:${API_PORT}/api/frankfurter?range=${fromDate}__${toDate}&from=${fromSym}&to=${toSym}`);
         const json = await res.json();
         if (json.rates) {
           data = Object.entries(json.rates)
@@ -782,7 +784,7 @@ function IndexChartModal({ index, onClose }) {
     if (cache.current[cacheKey]) { setChartData(cache.current[cacheKey]); return; }
     setLoading(true); setError(null); setChartData(null);
     try {
-      const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+      const alertServer = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
       const res  = await fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(index.symbol)}&range=${tfToRange(timeframe)}&interval=${tfToInterval(timeframe)}`);
       const json = await res.json();
       const result    = json?.chart?.result?.[0];
@@ -982,7 +984,7 @@ export default function App() {
 
   // ── Stock via Finnhub (quote) + Yahoo (30d history) ──────────────────────
   const fetchStock = async (symbol) => {
-    const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const alertServer = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
     // If key isn't loaded yet, skip Finnhub — returns null prices gracefully
     if (!finnhubKeyRef.current) return { priceUSD: null, prevUSD: null, change: null, historyUSD: null, asOf: null };
     const [quoteRes, historyRes] = await Promise.all([
@@ -1009,7 +1011,7 @@ export default function App() {
 
   // ── Crypto via CoinGecko (proxied through server to avoid CORS/rate limits) ──
   const cgFetch = async (path, params) => {
-    const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
     const qs  = Object.entries(params).map(([k,v]) => `${k}=${encodeURIComponent(v)}`).join("&");
     const res = await fetch(`${srv}/api/coingecko?path=${encodeURIComponent(path)}&${qs}`);
     if (res.status === 429) throw new Error("rate_limit");
@@ -1088,7 +1090,7 @@ export default function App() {
   // ── Forex via Frankfurter ──────────────────────────────────────────────────
   const fetchAllForex = async (symbols) => {
     if (!symbols.length) return {};
-    const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
     const results = {};
     await Promise.all(symbols.map(async sym => {
       if (sym === "SEK") { results[sym] = { priceSEK: 1, change: null, historySEK: null }; return; }
@@ -1145,7 +1147,7 @@ export default function App() {
   const fetchDividends = async (stockSymbols) => {
     const today    = new Date();
     const in30days = new Date(today.getTime() + 30 * 86400 * 1000);
-    const alertServer = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const alertServer = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
 
     const symbolsWithData = new Set();
     const results = [];
@@ -1452,7 +1454,7 @@ export default function App() {
   // Load config first, then fetchAll so fiatRates is populated before forex symbols are resolved.
   // Also fetch the live Big Mac price for Sweden from thebigmacindex.com in parallel.
   useEffect(() => {
-    const srv = `${window.location.protocol}//${window.location.hostname}:3001`;
+    const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
     Promise.all([
       fetch(`${srv}/api/config`).then(r => r.json()),
       fetch(`${srv}/api/bigmac?country=se`).then(r => r.json()).catch(() => null),

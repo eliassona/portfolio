@@ -5,7 +5,9 @@ import { readFileSync } from 'fs';
 import https from 'https';
 
 const app  = express();
-const PORT = 3001;
+const PORT = Number(process.env.API_PORT) || 3001;
+const HOLDINGS_FILE = process.env.HOLDINGS_FILE || './holdings.json';
+const CONFIG_FILE   = process.env.CONFIG_FILE   || './config.json';
 
 app.use(cors());
 app.use(express.json());
@@ -82,9 +84,9 @@ function yahooTtl(range, interval, events) {
 
 function loadConfig() {
   try {
-    return JSON.parse(readFileSync('./config.json', 'utf8'));
+    return JSON.parse(readFileSync(CONFIG_FILE, 'utf8'));
   } catch (err) {
-    console.error('Failed to load config.json:', err.message);
+    console.error('Failed to load ' + CONFIG_FILE + ':', err.message);
     process.exit(1);
   }
 }
@@ -365,7 +367,7 @@ async function fetchCryptoQuotes(cryptoHoldings, usdSek) {
 app.get('/api/networth', async (req, res) => {
   try {
     const config   = loadConfig();
-    const holdings = JSON.parse(readFileSync('./holdings.json', 'utf8'));
+    const holdings = JSON.parse(readFileSync(HOLDINGS_FILE, 'utf8'));
 
     // ── 1. USD/SEK rate via Yahoo ──────────────────────────────────────────────
     const usdSek = await new Promise((resolve) => {
@@ -470,7 +472,7 @@ function getCategory(h) {
 app.get('/api/portfolio', async (req, res) => {
   try {
     const config   = loadConfig();
-    const holdings = JSON.parse(readFileSync('./holdings.json', 'utf8'));
+    const holdings = JSON.parse(readFileSync(HOLDINGS_FILE, 'utf8'));
     const finnhubKey = config.finnhubKey ?? '';
 
     // ── 1. USD/SEK rate via Yahoo ──────────────────────────────────────────────
@@ -645,5 +647,5 @@ app.get('/api/portfolio', async (req, res) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Alert server running on http://localhost:${PORT}`);
+  console.log(`Alert server running on http://localhost:${PORT} (holdings: ${HOLDINGS_FILE}, config: ${CONFIG_FILE})`);
 });
