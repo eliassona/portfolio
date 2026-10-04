@@ -44,7 +44,7 @@ function applyRateOverrides(live, liveUsd, ov, { fiatRates, goldUsd, bigMacSEK, 
   // 2. Everything USD-denominated follows USD/SEK
   if (usd !== liveUsd) {
     for (const k of Object.keys(p)) {
-      if (k.startsWith("stock:") && p[k]?.priceUSD != null) patch(k, { priceSEK: p[k].priceUSD * usd });
+      if (k.startsWith("stock:") && p[k]?.priceUSD != null && !p[k]?.nonUsd) patch(k, { priceSEK: p[k].priceUSD * usd });
     }
   }
   for (const [sym, v] of Object.entries(newSek)) {
@@ -97,6 +97,38 @@ async function mapPool(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, queue.length) }, async () => {
     while (queue.length) await fn(queue.shift());
   }));
+}
+
+// ── Quote-currency helpers (non-USD listings such as VAGF.DE → EUR, VOD.L → GBp) ──
+const SUBUNITS = { GBp: ["GBP", 0.01], GBX: ["GBP", 0.01], ZAc: ["ZAR", 0.01], ILA: ["ILS", 0.01] };
+function currencyInfo(ccy) {
+  const c = ccy || "USD";
+  const [base, mult] = SUBUNITS[c] ?? [c, 1];
+  return { base, mult };
+}
+// Yahoo symbol for the quote currency → SEK history (null = already SEK)
+function fxYahooSymbol(ccy) {
+  const { base } = currencyInfo(ccy);
+  return base === "SEK" ? null : base === "USD" ? "SEK=X" : `${base}SEK=X`;
+}
+// SEK per 1 unit of the quote currency (subunit multiplier included). forexResults = already-fetched forex quotes.
+async function sekPerQuoteUnit(ccy, usdSek, forexResults) {
+  const { base, mult } = currencyInfo(ccy);
+  if (base === "SEK") return mult;
+  if (base === "USD") return usdSek * mult;
+  let r = forexResults?.[base]?.priceSEK;
+  if (!(r > 0)) {
+    try {
+      const res = await fetchT(`${ALERT_SERVER}/api/yahoo?symbol=${base}SEK%3DX&range=5d&interval=1d`);
+      r = (await res.json())?.chart?.result?.[0]?.meta?.regularMarketPrice;
+    } catch { /* try Frankfurter */ }
+  }
+  if (!(r > 0)) {
+    const res = await fetchT(`${ALERT_SERVER}/api/frankfurter?endpoint=latest&from=${base}&to=SEK`);
+    r = (await res.json())?.rates?.SEK;
+  }
+  if (!(r > 0)) throw new Error(`No ${base}/SEK rate`);
+  return r * mult;
 }
 
 // ── BTC data sources ─────────────────────────────────────────────────────────
@@ -295,37 +327,38 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
         else if (timeframe === "1Y")  { range = "1y";  interval = "1wk"; }
         else                          { range = "5y";  interval = "1wk"; }
         const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
-        // Fetch stock prices and historical USD/SEK in parallel for accurate point-by-point conversion
-        const [res, fxRes] = await Promise.all([
-          fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`),
-          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=${range}&interval=${interval}`),
-        ]);
+        const res = await fetch(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=${range}&interval=${interval}`);
         const json = await res.json();
         const result = json?.chart?.result?.[0];
         const timestamps = result?.timestamp;
         const closes     = result?.indicators?.quote?.[0]?.close;
 
-        // Build a date→rate map from historical FX data; fall back to spot rate for missing dates
+        // Convert from the listing currency (USD, EUR, GBp…) to SEK point-by-point using that day's FX rate
+        const ccy = result?.meta?.currency;
+        const fxSym = fxYahooSymbol(ccy);
+        const mult  = currencyInfo(ccy).mult;
         const fxRateMap = {};
-        try {
-          const fxJson   = await fxRes.json();
-          const fxResult = fxJson?.chart?.result?.[0];
-          const fxTs     = fxResult?.timestamp ?? [];
-          const fxClose  = fxResult?.indicators?.quote?.[0]?.close ?? [];
-          fxTs.forEach((t, i) => {
-            if (fxClose[i] != null) {
-              fxRateMap[new Date(t * 1000).toISOString().slice(0, 10)] = fxClose[i];
-            }
-          });
-        } catch { /* ignore — will fall back to spot rate */ }
+        let lastFx = null;
+        if (fxSym) {
+          try {
+            const fxJson   = await (await fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(fxSym)}&range=${range}&interval=${interval}`)).json();
+            const fxResult = fxJson?.chart?.result?.[0];
+            const fxTs     = fxResult?.timestamp ?? [];
+            const fxClose  = fxResult?.indicators?.quote?.[0]?.close ?? [];
+            fxTs.forEach((t, i) => {
+              if (fxClose[i] != null) { fxRateMap[new Date(t * 1000).toISOString().slice(0, 10)] = fxClose[i]; lastFx = fxClose[i]; }
+            });
+          } catch { /* fall back to spot rate */ }
+        }
+        const spotFx = fxSym === null ? 1 : fxSym === "SEK=X" ? rateRef.current : lastFx;
 
-        if (timestamps?.length && closes?.length) {
+        if (timestamps?.length && closes?.length && spotFx != null) {
           data = timestamps
             .map((t, i) => {
               if (closes[i] == null) return null;
               const dateStr = new Date(t * 1000).toISOString().slice(0, 10);
-              const fxRate  = fxRateMap[dateStr] ?? rateRef.current;
-              return { t: t * 1000, v: closes[i] * fxRate };
+              const fxRate  = fxRateMap[dateStr] ?? spotFx;
+              return { t: t * 1000, v: closes[i] * mult * fxRate };
             })
             .filter(d => d != null);
         }
@@ -378,39 +411,40 @@ function ChartModal({ holding, onClose, usdSekRate, prices }) {
       let daily = [], weekly = [];
       if (type === "stock") {
         const srv = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
-        const [dRes, wRes, fxDRes, fxWRes] = await Promise.all([
-          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=2y&interval=1d`),
-          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=max&interval=1wk`),
-          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=2y&interval=1d`),
-          fetch(`${srv}/api/yahoo?symbol=SEK%3DX&range=max&interval=1wk`),
+        const [dJson, wJson] = await Promise.all([
+          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=2y&interval=1d`).then(r => r.json()),
+          fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=max&interval=1wk`).then(r => r.json()),
         ]);
-        // Build date→FX rate maps for daily and weekly
-        const buildFxMap = async fxRes => {
-          const fxMap = {};
+        // Listing currency (USD, EUR, GBp…) → SEK, using the matching historical FX series
+        const ccy   = dJson?.chart?.result?.[0]?.meta?.currency;
+        const fxSym = fxYahooSymbol(ccy);
+        const mult  = currencyInfo(ccy).mult;
+        const buildFx = async (range, interval) => {
+          const fx = { map: {}, last: null };
+          if (!fxSym) return fx;
           try {
-            const fxJson   = await fxRes.json();
-            const fxResult = fxJson?.chart?.result?.[0];
-            const fxTs     = fxResult?.timestamp ?? [];
-            const fxClose  = fxResult?.indicators?.quote?.[0]?.close ?? [];
-            fxTs.forEach((t, i) => {
-              if (fxClose[i] != null) fxMap[new Date(t * 1000).toISOString().slice(0, 10)] = fxClose[i];
-            });
+            const j  = await (await fetch(`${srv}/api/yahoo?symbol=${encodeURIComponent(fxSym)}&range=${range}&interval=${interval}`)).json();
+            const r  = j?.chart?.result?.[0];
+            const ts = r?.timestamp ?? [], cl = r?.indicators?.quote?.[0]?.close ?? [];
+            ts.forEach((t, i) => { if (cl[i] != null) { fx.map[new Date(t * 1000).toISOString().slice(0, 10)] = cl[i]; fx.last = cl[i]; } });
           } catch { /* fall back to spot rate */ }
-          return fxMap;
+          return fx;
         };
-        const [fxDMap, fxWMap] = await Promise.all([buildFxMap(fxDRes), buildFxMap(fxWRes)]);
-        const parse = async (r, fxMap) => {
-          const j = await r.json();
+        const [fxD, fxW] = await Promise.all([buildFx("2y", "1d"), buildFx("max", "1wk")]);
+        const spotFx = fxSym === null ? 1 : fxSym === "SEK=X" ? rateRef.current : null;
+        const parse = (j, fx) => {
           const res = j?.chart?.result?.[0];
           const ts = res?.timestamp ?? [], cs = res?.indicators?.quote?.[0]?.close ?? [];
+          const fallback = spotFx ?? fx.last;
+          if (fallback == null) return [];
           return ts.map((t, i) => {
             if (cs[i] == null) return null;
             const dateStr = new Date(t * 1000).toISOString().slice(0, 10);
-            const fxRate  = fxMap[dateStr] ?? rateRef.current;
-            return { t: t * 1000, v: cs[i] * fxRate };
+            return { t: t * 1000, v: cs[i] * mult * (fx.map[dateStr] ?? fallback) };
           }).filter(Boolean);
         };
-        [daily, weekly] = await Promise.all([parse(dRes, fxDMap), parse(wRes, fxWMap)]);
+        daily  = parse(dJson, fxD);
+        weekly = parse(wJson, fxW);
       } else {
         const id = COINGECKO_IDS[sym];
         if (!id) return;
@@ -982,31 +1016,44 @@ export default function App() {
     return () => clearTimeout(id);
   }, []);
 
-  // ── Stock via Finnhub (quote) + Yahoo (30d history) ──────────────────────
-  const fetchStock = async (symbol) => {
+  // ── Stock via Finnhub (US quote) with Yahoo fallback (any exchange, any currency) ──
+  // Prices are returned as "USD-equivalent" (native price × quoteCcy/SEK ÷ USD/SEK) so the rest of the
+  // app, which works in priceUSD × USD/SEK, keeps giving the right SEK value for e.g. EUR-listed ETFs.
+  const fetchStock = async (symbol, usdSek, forexResults) => {
     const alertServer = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
-    // If key isn't loaded yet, skip Finnhub — returns null prices gracefully
-    if (!finnhubKeyRef.current) return { priceUSD: null, prevUSD: null, change: null, historyUSD: null, asOf: null };
-    const [quoteRes, historyRes] = await Promise.all([
-      fetch(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${finnhubKeyRef.current}`),
-      fetch(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(symbol)}&range=1mo&interval=1d`),
+    const [quoteR, yahooR] = await Promise.allSettled([
+      finnhubKeyRef.current
+        ? fetchT(`https://finnhub.io/api/v1/quote?symbol=${symbol}&token=${finnhubKeyRef.current}`).then(r => r.json())
+        : Promise.resolve(null),
+      fetchT(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(symbol)}&range=1mo&interval=1d`).then(r => r.json()),
     ]);
-    const quote = await quoteRes.json();
-    const priceUSD = quote.c ?? null;
-    const prevUSD  = quote.pc ?? null;
-    const change   = priceUSD != null && prevUSD != null && prevUSD !== 0 ? ((priceUSD - prevUSD) / prevUSD) * 100 : null;
-    // quote.t is the unix timestamp of the last trade Finnhub has — on a closed market
-    // (weekend/holiday) this stays pinned to the last session's close, letting the UI
-    // tell "today" apart from "stale, market is closed" instead of implying a live move.
-    const asOf = quote.t ?? null;
-    let historyUSD = null;
-    try {
-      const hJson  = await historyRes.json();
-      const closes = hJson?.chart?.result?.[0]?.indicators?.quote?.[0]?.close ?? [];
-      const filtered = closes.filter(v => v != null);
-      if (filtered.length > 1) historyUSD = filtered;
-    } catch { /* history unavailable */ }
-    return { priceUSD, prevUSD, change, historyUSD, asOf };
+    const quote  = quoteR.status === "fulfilled" ? quoteR.value : null;
+    const result = yahooR.status === "fulfilled" ? yahooR.value?.chart?.result?.[0] : null;
+    const closes = (result?.indicators?.quote?.[0]?.close ?? []).filter(v => v != null);
+
+    // Finnhub free tier only covers US listings; for others it errors or returns zeros
+    if (quote?.c > 0) {
+      return { priceUSD: quote.c, prevUSD: quote.pc ?? null,
+        change: quote.pc ? ((quote.c - quote.pc) / quote.pc) * 100 : null,
+        historyUSD: closes.length > 1 ? closes : null, asOf: quote.t ?? null, nonUsd: false };
+    }
+
+    // Yahoo fallback — quote is in the listing currency (meta.currency)
+    const live = result?.meta?.regularMarketPrice;
+    const native = live > 0 ? live : closes.length ? closes[closes.length - 1] : null;
+    if (!(native > 0)) return { priceUSD: null, prevUSD: null, change: null, historyUSD: null, asOf: null, nonUsd: false };
+    const ccy    = result?.meta?.currency ?? "USD";
+    const factor = (await sekPerQuoteUnit(ccy, usdSek, forexResults)) / usdSek; // quote unit → USD-equivalent
+    console.log(`[price] ${symbol}: Yahoo ${native} ${ccy} → ${(native * factor * usdSek).toFixed(2)} SEK`);
+    const prev   = closes.length > 1 ? closes[closes.length - 2] : (result?.meta?.chartPreviousClose ?? null);
+    return {
+      priceUSD:   native * factor,
+      prevUSD:    prev > 0 ? prev * factor : null,
+      change:     prev > 0 ? ((native - prev) / prev) * 100 : null,
+      historyUSD: closes.length > 1 ? closes.map(v => v * factor) : null,
+      asOf:       result?.meta?.regularMarketTime ?? null,
+      nonUsd:     currencyInfo(ccy).base !== "USD",
+    };
   };
 
   // ── Crypto via CoinGecko (proxied through server to avoid CORS/rate limits) ──
@@ -1144,7 +1191,7 @@ export default function App() {
   // ── Dividends: Finnhub + manual fallback ─────────────────────────────────
   // Fetches upcoming dividends via Yahoo Finance proxy (Finnhub dividend endpoint is paid-only).
   // Falls back to dividendPerShare + dividendFrequency fields on the holding in holdings.json.
-  const fetchDividends = async (stockSymbols) => {
+  const fetchDividends = async (stockSymbols, usdSek, forexResults) => {
     const today    = new Date();
     const in30days = new Date(today.getTime() + 30 * 86400 * 1000);
     const alertServer = `${window.location.protocol}//${window.location.hostname}:${API_PORT}`;
@@ -1158,13 +1205,17 @@ export default function App() {
         const res  = await fetchT(`${alertServer}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=3mo&interval=1d&events=div`);
         const json = await res.json();
         const divEvents = json?.chart?.result?.[0]?.events?.dividends ?? {};
+        // dividend amounts are in the listing currency → convert to USD-equivalent like prices
+        const divFactor = Object.keys(divEvents).length
+          ? (await sekPerQuoteUnit(json?.chart?.result?.[0]?.meta?.currency ?? "USD", usdSek, forexResults)) / usdSek
+          : 1;
         const todayTs   = Math.floor(today.getTime() / 1000);
         const futureTs  = Math.floor(in30days.getTime() / 1000);
         for (const ev of Object.values(divEvents)) {
           if (ev.date >= todayTs && ev.date <= futureTs) {
             symbolsWithData.add(sym);
             const exDate = new Date(ev.date * 1000).toISOString().slice(0, 10);
-            results.push({ symbol: sym, source: "yahoo", amount: ev.amount, exDate });
+            results.push({ symbol: sym, source: "yahoo", amount: ev.amount * divFactor, exDate });
           }
         }
       } catch { /* skip */ }
@@ -1260,19 +1311,23 @@ export default function App() {
 
       await mapPool(uniqueStockKeys, 4, async (key) => {
         const sym = key.replace(/^stock:/, "");
+        console.log(`[price] fetching ${sym}`);
         try {
-          const { priceUSD, prevUSD, change, historyUSD, asOf } = await fetchStock(sym);
+          const { priceUSD, prevUSD, change, historyUSD, asOf, nonUsd } = await fetchStock(sym, usdSek, forexResults);
           results[key] = {
             priceSEK:   priceUSD != null ? priceUSD * usdSek : null,
             prevUSD,
             priceUSD,
+            nonUsd,
             historySEK: historyUSD != null ? historyUSD.map(v => v * usdSek) : null,
             change,
             asOf,
           };
-        } catch {
+        } catch (e) {
+          console.warn(`Price fetch failed for ${sym}:`, e);
           results[key] = { priceSEK: null, change: null, historySEK: null, asOf: null };
         }
+        if (results[key]?.priceSEK == null) console.warn(`No price for ${sym} (Finnhub + Yahoo both empty) — check ${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=1mo&interval=1d`);
       });
 
       for (const key of uniqueForexKeys) {
@@ -1439,7 +1494,7 @@ export default function App() {
 
       // Fetch dividends for unique stock symbols (deduplicated, skip ETF aliases)
       const uniqueStockSymbols = [...new Set(stockHoldings.map(h => h.priceSymbol ?? h.symbol))];
-      const divResults = await fetchDividends(uniqueStockSymbols);
+      const divResults = await fetchDividends(uniqueStockSymbols, usdSek, forexResults);
       setDividends(divResults);
 
       setFetchStatus("done");
@@ -1524,7 +1579,9 @@ export default function App() {
     const asOf       = p?.asOf       ?? null;
     const valueSEK   = priceSEK != null ? h.shares * priceSEK : null;
     // avgCost may be in USD — convert to SEK if currency field says so
-    const avgCostSEK = h.currency === "USD" ? h.avgCost * usdSekRate : h.avgCost;
+    const avgCostSEK = !h.currency || h.currency === "SEK" ? h.avgCost
+      : h.currency === "USD" ? h.avgCost * usdSekRate
+      : h.avgCost * (prices[`forex:${h.currency}`]?.priceSEK ?? 0); // e.g. "EUR"
     const costSEK    = h.shares * avgCostSEK;
     const gainSEK    = valueSEK != null ? valueSEK - costSEK : null;
     const gainPct    = gainSEK != null && costSEK !== 0 ? (gainSEK / costSEK) * 100 : null;
