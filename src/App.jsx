@@ -954,6 +954,8 @@ export default function App() {
   const [bigMacSEK, setBigMacSEK]             = useState(54);    // Swedish Big Mac price in SEK
   const [fiatRates, setFiatRates]             = useState([]); // configurable via config.json
   const [allocationLimits, setAllocationLimits] = useState({}); // per-category min/max %, configurable via config.json
+  const [displayCurrency, setDisplayCurrency] = useState("SEK");   // display.currency in config.json
+  const [sinceStart, setSinceStart]           = useState(null);    // sinceStart { amount, currency } in config.json
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
   const [selectedIndex, setSelectedIndex]     = useState(null); // for market index chart modal
@@ -978,8 +980,12 @@ export default function App() {
 
   // Keep fiatSymbolsRef in sync with fiatRates state
   useEffect(() => {
-    fiatSymbolsRef.current = fiatRates.flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
-  }, [fiatRates]);
+    fiatSymbolsRef.current = [
+      ...fiatRates.flatMap(p => [p.from, p.to]),
+      displayCurrency,
+      sinceStart?.currency,
+    ].filter(s => s && s !== "BTC");
+  }, [fiatRates, displayCurrency, sinceStart]);
 
   // Countdown ticker (no dependency on fetchAll)
   useEffect(() => {
@@ -1527,9 +1533,12 @@ export default function App() {
       else if (cfg.bigMacSEK)   setBigMacSEK(cfg.bigMacSEK); // fall back to config.json
       if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
       if (cfg.allocationLimits) setAllocationLimits(cfg.allocationLimits);
+      if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency);
+      if (cfg.sinceStart?.amount > 0) setSinceStart({ amount: cfg.sinceStart.amount, currency: cfg.sinceStart.currency ?? "SEK" });
       if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
       // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
-      const fiatSymbols = (cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]).filter(s => s !== "BTC");
+      // (also include the display currency and the "since start" currency so their rates get fetched)
+      const fiatSymbols = [...(cfg.exchangeRates ?? []).flatMap(p => [p.from, p.to]), cfg.display?.currency, cfg.sinceStart?.currency].filter(s => s && s !== "BTC");
       fetchAll(fiatSymbols);
     }).catch(() => { fetchAll([]); }); // both unreachable — fetch anyway with no extras
   }, []); // eslint-disable-line
@@ -1553,6 +1562,7 @@ export default function App() {
   }, [fetchAll, lastFetched]);
 
   // All values in SEK — simple formatters, no conversion needed
+  const fmtDisplay = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: displayCurrency, maximumFractionDigits: 0 }).format(n);
   const fmtSEK     = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
   const fmtSEKFull = n => n == null ? "—" : new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", minimumFractionDigits: 2, maximumFractionDigits: 2 }).format(n);
   const fmtPct     = n => n == null ? "—" : (n >= 0 ? "+" : "") + n.toFixed(2) + "%";
@@ -1592,6 +1602,19 @@ export default function App() {
   const totalCost    = enriched.reduce((s, h) => s + h.costSEK, 0);
   const totalGain    = totalValue - totalCost;
   const totalGainPct = totalCost > 0 ? (totalGain / totalCost) * 100 : 0;
+
+  // "Since start": current portfolio value vs. the starting amount from config.json (sinceStart),
+  // shown in the display currency. Everything is SEK internally, so convert via live SEK-per-unit rates.
+  const sekPerUnit = cur => !cur || cur === "SEK" ? 1 : cur === "USD" ? usdSekRate : (prices[`forex:${cur}`]?.priceSEK ?? null);
+  const sinceStartInfo = (() => {
+    if (!sinceStart || totalValue <= 0) return null;
+    const startRate = sekPerUnit(sinceStart.currency);
+    const dispRate  = sekPerUnit(displayCurrency);
+    if (!startRate || !dispRate) return null;
+    const startSEK = sinceStart.amount * startRate;
+    const gainSEK  = totalValue - startSEK;
+    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100 };
+  })();
   const dayChange = enriched.reduce((s, h) => {
     if (h.priceSEK == null) return s;
     if (h.type === "stock" && h.priceUSD != null && h.prevUSD != null) {
@@ -2146,7 +2169,19 @@ export default function App() {
         )}
         <div className={`metrics-grid fade-in ${animated ? "visible" : ""}`}>
           <MetricCard label="Net Worth"    value={fmtSEK(netWorth)}  sub={whatIfActive ? "What-if rates" : missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : "Assets minus debt"} accent={whatIfActive ? "#f59e0b" : "linear-gradient(90deg,#22d3a5,#6366f1)"} loading={isLoading && totalValue === 0} />
-          <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : fmtPct(totalGainPct) + " return"} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
+          <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : (
+            <>
+              {fmtPct(totalGainPct)} return
+              {sinceStartInfo && (
+                <span style={{ display: "block", marginTop: 3 }}>
+                  Since start:{" "}
+                  <span style={{ color: sinceStartInfo.gainDisplay >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>
+                    {sinceStartInfo.gainDisplay >= 0 ? "+" : "−"}{fmtDisplay(Math.abs(sinceStartInfo.gainDisplay))} ({fmtPct(sinceStartInfo.pct)})
+                  </span>
+                </span>
+              )}
+            </>
+          )} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " " + dayLabel} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
           <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
         </div>

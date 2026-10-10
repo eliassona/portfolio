@@ -177,6 +177,8 @@ app.get('/api/config', (req, res) => {
     exchangeRates:    config.exchangeRates    ?? [],
     finnhubKey:       config.finnhubKey       ?? '',
     allocationLimits: config.allocationLimits ?? {},
+    display:          config.display          ?? { currency: 'SEK' },
+    sinceStart:       config.sinceStart       ?? null,
   });
 });
 
