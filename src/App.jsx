@@ -1534,7 +1534,7 @@ export default function App() {
       if (cfg.exchangeRates)    setFiatRates(cfg.exchangeRates);
       if (cfg.allocationLimits) setAllocationLimits(cfg.allocationLimits);
       if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency);
-      if (cfg.sinceStart?.amount > 0) setSinceStart({ amount: cfg.sinceStart.amount, currency: cfg.sinceStart.currency ?? "SEK" });
+      if (cfg.sinceStart?.amount > 0) setSinceStart({ amount: cfg.sinceStart.amount, currency: cfg.sinceStart.currency ?? "SEK", date: cfg.sinceStart.date ?? null });
       if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
       // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
       // (also include the display currency and the "since start" currency so their rates get fetched)
@@ -1613,7 +1613,15 @@ export default function App() {
     if (!startRate || !dispRate) return null;
     const startSEK = sinceStart.amount * startRate;
     const gainSEK  = totalValue - startSEK;
-    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100 };
+    // CAGR from the start date: (end / start)^(1 / years) − 1. Needs a valid date and at least ~30 days
+    // of history — annualising anything shorter produces meaningless numbers.
+    let cagr = null;
+    const startMs = sinceStart.date ? new Date(sinceStart.date + "T00:00:00").getTime() : NaN;
+    if (!Number.isNaN(startMs)) {
+      const years = (Date.now() - startMs) / (365.25 * 86400000);
+      if (years * 365.25 >= 30) cagr = (Math.pow(totalValue / startSEK, 1 / years) - 1) * 100;
+    }
+    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100, cagr };
   })();
   const dayChange = enriched.reduce((s, h) => {
     if (h.priceSEK == null) return s;
@@ -2178,6 +2186,14 @@ export default function App() {
                   <span style={{ color: sinceStartInfo.gainDisplay >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>
                     {sinceStartInfo.gainDisplay >= 0 ? "+" : "−"}{fmtDisplay(Math.abs(sinceStartInfo.gainDisplay))} ({fmtPct(sinceStartInfo.pct)})
                   </span>
+                  {sinceStartInfo.cagr != null && (
+                    <span style={{ display: "block", marginTop: 3 }}>
+                      CAGR:{" "}
+                      <span style={{ color: sinceStartInfo.cagr >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>
+                        {fmtPct(sinceStartInfo.cagr)} p.a.
+                      </span>
+                    </span>
+                  )}
                 </span>
               )}
             </>
