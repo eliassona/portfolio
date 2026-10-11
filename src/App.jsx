@@ -956,6 +956,11 @@ export default function App() {
   const [allocationLimits, setAllocationLimits] = useState({}); // per-category min/max %, configurable via config.json
   const [displayCurrency, setDisplayCurrency] = useState("SEK");   // display.currency in config.json
   const [sinceStart, setSinceStart]           = useState(null);    // sinceStart { amount, currency } in config.json
+  const [cagrWhatIf, setCagrWhatIf]           = useState(null);    // what-if CAGR in % p.a. (null = off)
+  const [editingCagr, setEditingCagr]         = useState(false);
+  const [cagrText, setCagrText]               = useState("");
+  const cagrInitRef   = useRef("");
+  const cagrCancelRef = useRef(false);
   const [expandedCat, setExpandedCat]         = useState(null); // for allocation panel
   const [selectedRate, setSelectedRate]       = useState(null); // for exchange rate chart modal
   const [selectedIndex, setSelectedIndex]     = useState(null); // for market index chart modal
@@ -1615,13 +1620,20 @@ export default function App() {
     const gainSEK  = totalValue - startSEK;
     // CAGR from the start date: (end / start)^(1 / years) − 1. Needs a valid date and at least ~30 days
     // of history — annualising anything shorter produces meaningless numbers.
-    let cagr = null;
+    let cagr = null, hypo = null;
     const startMs = sinceStart.date ? new Date(sinceStart.date + "T00:00:00").getTime() : NaN;
     if (!Number.isNaN(startMs)) {
       const years = (Date.now() - startMs) / (365.25 * 86400000);
-      if (years * 365.25 >= 30) cagr = (Math.pow(totalValue / startSEK, 1 / years) - 1) * 100;
+      if (years * 365.25 >= 30) {
+        cagr = (Math.pow(totalValue / startSEK, 1 / years) - 1) * 100;
+        // What-if: what the start amount would be worth today if it had grown at the chosen CAGR
+        if (cagrWhatIf != null) {
+          const hypoSEK = startSEK * Math.pow(1 + cagrWhatIf / 100, years);
+          hypo = { value: hypoSEK / dispRate, diff: (hypoSEK - totalValue) / dispRate };
+        }
+      }
     }
-    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100, cagr };
+    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100, cagr, hypo };
   })();
   const dayChange = enriched.reduce((s, h) => {
     if (h.priceSEK == null) return s;
@@ -2186,14 +2198,54 @@ export default function App() {
                   <span style={{ color: sinceStartInfo.gainDisplay >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>
                     {sinceStartInfo.gainDisplay >= 0 ? "+" : "−"}{fmtDisplay(Math.abs(sinceStartInfo.gainDisplay))} ({fmtPct(sinceStartInfo.pct)})
                   </span>
-                  {sinceStartInfo.cagr != null && (
-                    <span style={{ display: "block", marginTop: 3 }}>
-                      CAGR:{" "}
-                      <span style={{ color: sinceStartInfo.cagr >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>
-                        {fmtPct(sinceStartInfo.cagr)} p.a.
-                      </span>
-                    </span>
-                  )}
+                  {sinceStartInfo.cagr != null && (() => {
+                    const isOv = cagrWhatIf != null;
+                    const shown = isOv ? cagrWhatIf : sinceStartInfo.cagr;
+                    const startEdit = () => {
+                      const init = String(+sinceStartInfo.cagr.toFixed(2));
+                      cagrInitRef.current = init; cagrCancelRef.current = false;
+                      setCagrText(isOv ? String(cagrWhatIf) : init);
+                      setEditingCagr(true);
+                    };
+                    const commitEdit = () => {
+                      const cancelled = cagrCancelRef.current;
+                      cagrCancelRef.current = false;
+                      setEditingCagr(false);
+                      if (cancelled || cagrText.trim() === cagrInitRef.current) return; // cancelled / untouched
+                      const n = parseFloat(cagrText.replace(/[\s\u00a0%]/g, "").replace(",", "."));
+                      if (Number.isFinite(n) && n > -100) setCagrWhatIf(n);
+                    };
+                    return (
+                      <>
+                        <span style={{ display: "block", marginTop: 3 }}>
+                          CAGR:{" "}
+                          {editingCagr ? (
+                            <input autoFocus inputMode="decimal" value={cagrText}
+                              onChange={e => setCagrText(e.target.value)}
+                              onFocus={e => e.target.select()}
+                              onKeyDown={e => {
+                                if (e.key === "Enter") e.currentTarget.blur();
+                                else if (e.key === "Escape") { cagrCancelRef.current = true; e.currentTarget.blur(); }
+                              }}
+                              onBlur={commitEdit}
+                              style={{ width: 64, textAlign: "right", background: "rgba(255,255,255,0.08)", border: "1px solid rgba(245,158,11,0.5)", borderRadius: 6, padding: "1px 6px", color: "#f59e0b", fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", outline: "none" }} />
+                          ) : (
+                            <span onClick={startEdit} title={isOv ? "What-if CAGR — click to edit" : "Click to try a different CAGR"}
+                              style={{ color: isOv ? "#f59e0b" : shown >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600, cursor: "text", borderBottom: "1px dashed rgba(255,255,255,0.18)" }}>
+                              {fmtPct(shown)}
+                            </span>
+                          )}
+                          {" "}p.a.
+                          {isOv && <span onClick={() => setCagrWhatIf(null)} title="Back to actual CAGR" style={{ marginLeft: 6, fontSize: 12, color: "#f59e0b", cursor: "pointer" }}>↺</span>}
+                        </span>
+                        {sinceStartInfo.hypo && (
+                          <span style={{ display: "block", marginTop: 3, color: "#f59e0b" }}>
+                            What-if: {fmtDisplay(sinceStartInfo.hypo.value)} ({sinceStartInfo.hypo.diff >= 0 ? "+" : "−"}{fmtDisplay(Math.abs(sinceStartInfo.hypo.diff))} vs now)
+                          </span>
+                        )}
+                      </>
+                    );
+                  })()}
                 </span>
               )}
             </>
