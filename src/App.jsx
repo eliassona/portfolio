@@ -1633,7 +1633,7 @@ export default function App() {
         }
       }
     }
-    return { gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100, cagr, hypo };
+    return { startDisplay: startSEK / dispRate, gainDisplay: gainSEK / dispRate, pct: (gainSEK / startSEK) * 100, cagr, hypo };
   })();
   const dayChange = enriched.reduce((s, h) => {
     if (h.priceSEK == null) return s;
@@ -2192,6 +2192,15 @@ export default function App() {
           <MetricCard label="Portfolio"    value={totalValue > 0 ? fmtSEK(totalValue) : "—"} sub={missingPrices > 0 && !isLoading ? `⚠ ${missingPrices} price${missingPrices > 1 ? "s" : ""} missing` : (
             <>
               {fmtPct(totalGainPct)} return
+              {sinceStartInfo && (
+                <span style={{ display: "block", marginTop: 3 }}>
+                  Start capital: <span style={{ color: "#d1d5db", fontWeight: 600 }}>{fmtDisplay(sinceStartInfo.startDisplay)}</span>
+                  {sinceStart.currency !== displayCurrency && (
+                    <span style={{ color: "#6b7280" }}> ({new Intl.NumberFormat("sv-SE", { style: "currency", currency: sinceStart.currency, maximumFractionDigits: 0 }).format(sinceStart.amount)})</span>
+                  )}
+                  {sinceStart.date && <span style={{ color: "#6b7280" }}> · {sinceStart.date}</span>}
+                </span>
+              )}
               {sinceStartInfo && (
                 <span style={{ display: "block", marginTop: 3 }}>
                   Since start:{" "}
