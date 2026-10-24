@@ -353,6 +353,44 @@ async function fetchCryptoQuotes(cryptoHoldings, usdSek) {
   return quotes;
 }
 
+// ── Pension helpers ──────────────────────────────────────────────────────────
+// Pension entries use a fixed valueSEK from holdings.json. If an entry also has `shares` + `priceSymbol`
+// (a Yahoo symbol, e.g. a Morningstar id like 0P0000XXXX.IR), the live price is used instead and
+// valueSEK is only the fallback when no price can be fetched.
+async function fetchPensionQuotes(pensionHoldings, usdSek) {
+  const out  = {};
+  const syms = [...new Set(pensionHoldings.filter(h => h.priceSymbol).map(h => h.priceSymbol))];
+  const SUB  = { GBp: ['GBP', 0.01], GBX: ['GBP', 0.01] };
+  const chart = async (sym) => {
+    const r = await cachedUpstream(`https://query2.finance.yahoo.com/v8/finance/chart/${encodeURIComponent(sym)}?range=5d&interval=1d`, 60 * 1000);
+    if (r.status !== 200) return null;
+    return JSON.parse(r.body)?.chart?.result?.[0] ?? null;
+  };
+  await Promise.all(syms.map(async sym => {
+    try {
+      const res    = await chart(sym);
+      const closes = (res?.indicators?.quote?.[0]?.close ?? []).filter(v => v != null);
+      const native = res?.meta?.regularMarketPrice > 0 ? res.meta.regularMarketPrice : closes.at(-1);
+      if (!(native > 0)) return;
+      const [base, mult] = SUB[res?.meta?.currency ?? 'SEK'] ?? [res?.meta?.currency ?? 'SEK', 1];
+      let fx = 1;
+      if (base === 'USD') fx = usdSek;
+      else if (base !== 'SEK') {
+        const fxRes = await chart(`${base}SEK=X`);
+        fx = fxRes?.meta?.regularMarketPrice;
+        if (!(fx > 0)) return;
+      }
+      const prev = closes.length > 1 ? closes.at(-2) : (res?.meta?.chartPreviousClose ?? null);
+      out[sym] = { priceSEK: native * mult * fx, change: prev > 0 ? ((native - prev) / prev) * 100 : null };
+    } catch (err) { console.warn(`pension price failed for ${sym}: ${err.message}`); }
+  }));
+  return out;
+}
+const pensionValue = (h, quotes) => {
+  const q = h.priceSymbol ? quotes[h.priceSymbol] : null;
+  return q && h.shares > 0 ? h.shares * q.priceSEK : (h.valueSEK ?? 0);
+};
+
 // Net Worth endpoint — replicates the frontend calculation server-side for the Apple Watch widget.
 // Fetches live prices for stocks (Yahoo), crypto (CoinGecko), and forex (Frankfurter),
 // then combines with static holdings.json values for real estate, manual assets, and debt.
@@ -430,14 +468,18 @@ app.get('/api/networth', async (req, res) => {
 
     const totalRealEstate = holdings.filter(h => h.type === 'realestate').reduce((s, h) => s + (h.valueSEK ?? 0), 0);
     const totalManual     = holdings.filter(h => h.type === 'manual').reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+    const pensionHoldings = holdings.filter(h => h.type === 'pension');
+    const pensionQuotes   = await fetchPensionQuotes(pensionHoldings, usdSek);
+    const totalPension    = pensionHoldings.reduce((s, h) => s + pensionValue(h, pensionQuotes), 0);
     const totalDebt       = holdings.filter(h => h.type === 'debt').reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
-    const netWorth        = totalPortfolio + totalRealEstate + totalManual - totalDebt;
+    const netWorth        = totalPortfolio + totalRealEstate + totalManual + totalPension - totalDebt;
 
     res.json({
       netWorth:       Math.round(netWorth),
       totalPortfolio: Math.round(totalPortfolio),
       totalRealEstate,
       totalManual,
+      totalPension:   Math.round(totalPension),
       totalDebt:      Math.round(totalDebt),
       usdSek:         Math.round(usdSek * 100) / 100,
       updatedAt:      new Date().toISOString(),
@@ -454,6 +496,7 @@ function getCategory(h) {
   if (h.type === 'crypto')     return 'Crypto';
   if (h.type === 'forex')      return 'Cash';
   if (h.type === 'realestate') return 'Real Estate';
+  if (h.type === 'pension')    return 'Pension';
   if (h.type === 'debt')       return null; // excluded from allocation
   return 'Stocks';
 }
@@ -586,6 +629,17 @@ app.get('/api/portfolio', async (req, res) => {
       account: h.account ?? null, balanceSEK: h.balanceSEK ?? 0, interestRate: h.interestRate ?? null,
     }));
 
+    const pensionHoldings = holdings.filter(h => h.type === 'pension');
+    const pensionQuotes   = await fetchPensionQuotes(pensionHoldings, usdSek);
+    const pension = pensionHoldings.map(h => {
+      const q = h.priceSymbol ? pensionQuotes[h.priceSymbol] : null;
+      return {
+        symbol: h.symbol ?? h.name, name: h.name ?? null, category: getCategory(h),
+        account: h.account ?? null, valueSEK: pensionValue(h, pensionQuotes), costSEK: h.costSEK ?? null,
+        shares: h.shares ?? null, priceSEK: q?.priceSEK ?? null, changePct: q?.change ?? null, live: !!q && h.shares > 0,
+      };
+    });
+
     // ── 7. Totals — mirrors the metric cards + allocation panel on the frontend ─
     const totalValue      = enriched.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
     const totalCost       = enriched.reduce((s, h) => s + (h.costSEK ?? 0), 0);
@@ -594,14 +648,15 @@ app.get('/api/portfolio', async (req, res) => {
     const dayChange       = enriched.reduce((s, h) => s + (h.dayChangeSEK ?? 0), 0);
     const totalRealEstate = realEstate.reduce((s, h) => s + h.valueSEK, 0);
     const totalManual     = manual.reduce((s, h) => s + h.valueSEK, 0);
+    const totalPension    = pension.reduce((s, h) => s + h.valueSEK, 0);
     const totalDebt       = debt.reduce((s, h) => s + h.balanceSEK, 0);
-    const netWorth         = totalValue + totalRealEstate + totalManual - totalDebt;
+    const netWorth         = totalValue + totalRealEstate + totalManual + totalPension - totalDebt;
     const missingPrices    = enriched.filter(h => h.priceSEK == null).length;
 
     // Allocation by category — uses live value, falling back to cost basis when a price is missing
-    const allocationTotal = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0) + totalRealEstate + totalManual;
+    const allocationTotal = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0) + totalRealEstate + totalManual + totalPension;
     const byCategory = {};
-    for (const h of [...enriched, ...realEstate, ...manual]) {
+    for (const h of [...enriched, ...realEstate, ...manual, ...pension]) {
       if (!h.category) continue;
       const v = h.valueSEK ?? h.costSEK ?? 0;
       byCategory[h.category] = (byCategory[h.category] ?? 0) + v;
@@ -621,6 +676,7 @@ app.get('/api/portfolio', async (req, res) => {
         dayChangePct: totalValue > 0 ? (dayChange / totalValue) * 100 : null,
         totalRealEstate: Math.round(totalRealEstate),
         totalManual: Math.round(totalManual),
+        totalPension: Math.round(totalPension),
         totalDebt: Math.round(totalDebt),
         usdSek: Math.round(usdSek * 100) / 100,
         missingPrices,
@@ -628,6 +684,7 @@ app.get('/api/portfolio', async (req, res) => {
       holdings: enriched,
       realEstate,
       manual,
+      pension,
       debt,
       allocation,
       updatedAt: new Date().toISOString(),

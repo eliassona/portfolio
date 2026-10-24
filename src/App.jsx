@@ -195,7 +195,6 @@ const INDEXES = [
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
   { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
-  { symbol: "^MOVE",   name: "MOVE Index",     group: "US" },
   { symbol: "^OMX",       name: "OMX Stockholm",  group: "Nordic" },
   { symbol: "^OMXC25",    name: "OMX Copenhagen", group: "Nordic" },
   { symbol: "SE10Y_BOND", name: "Sweden 10Y",     group: "Nordic" },
@@ -235,6 +234,7 @@ const CATEGORY_COLORS = {
   "Real Estate": "#22d3a5",
   "Cash":        "#38bdf8",
   "Commodities": "#fb923c",
+  "Pension":     "#e879f9",
   "Other":       "#a78bfa",
 };
 function getCategory(h) {
@@ -242,6 +242,7 @@ function getCategory(h) {
   if (h.type === "crypto")      return "Crypto";
   if (h.type === "forex")       return "Cash";
   if (h.type === "realestate")  return "Real Estate";
+  if (h.type === "pension")     return "Pension";
   if (h.type === "debt")        return null; // excluded from allocation
   return "Stocks";
 }
@@ -929,7 +930,7 @@ function IndexChartModal({ index, onClose }) {
 
 export default function App() {
   const holdings = holdingsData
-    .filter(h => h.type !== "realestate" && h.type !== "debt" && h.type !== "manual")
+    .filter(h => !["realestate", "debt", "manual", "pension"].includes(h.type))
     .map((h, i) => ({ ...h, id: i, color: COLORS[i % COLORS.length] }));
 
   const [livePrices, setPrices] = useState({});
@@ -1342,6 +1343,32 @@ export default function App() {
         if (results[key]?.priceSEK == null) console.warn(`No price for ${sym} (Finnhub + Yahoo both empty) — check ${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=1mo&interval=1d`);
       });
 
+      // Pension funds with a priceSymbol (optional live mode, e.g. a Morningstar id "0P0000XXXX.IR" on Yahoo).
+      // Funds without one just use the fixed valueSEK from holdings.json.
+      const pensionSyms = [...new Set(holdingsData.filter(h => h.type === "pension" && h.priceSymbol).map(h => h.priceSymbol))];
+      await mapPool(pensionSyms, 4, async (sym) => {
+        const key = `pension:${sym}`;
+        try {
+          const res    = await fetchT(`${ALERT_SERVER}/api/yahoo?symbol=${encodeURIComponent(sym)}&range=1mo&interval=1d`);
+          const result = (await res.json())?.chart?.result?.[0];
+          const closes = (result?.indicators?.quote?.[0]?.close ?? []).filter(v => v != null);
+          const live   = result?.meta?.regularMarketPrice;
+          const native = live > 0 ? live : closes.length ? closes[closes.length - 1] : null;
+          if (!(native > 0)) throw new Error("no price");
+          const sekPer = await sekPerQuoteUnit(result?.meta?.currency ?? "SEK", usdSek, forexResults);
+          const prev   = closes.length > 1 ? closes[closes.length - 2] : (result?.meta?.chartPreviousClose ?? null);
+          results[key] = {
+            priceSEK:   native * sekPer,
+            change:     prev > 0 ? ((native - prev) / prev) * 100 : null,
+            historySEK: closes.length > 1 ? closes.map(v => v * sekPer) : null,
+            asOf:       result?.meta?.regularMarketTime ?? null,
+          };
+        } catch (e) {
+          console.warn(`Pension price failed for ${sym} — using fixed valueSEK:`, e.message);
+          results[key] = { priceSEK: null, change: null, historySEK: null, asOf: null };
+        }
+      });
+
       for (const key of uniqueForexKeys) {
         const sym = key.replace(/^forex:/, "");
         results[key] = forexResults[sym] ?? { priceSEK: null, change: null, historySEK: null };
@@ -1669,16 +1696,28 @@ export default function App() {
   const totalRealEstate = realEstateRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
   const totalDebt       = debtRows.reduce((s, h) => s + (h.balanceSEK ?? 0), 0);
   const totalManual     = manualRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
-  const netWorth        = totalValue + totalRealEstate + totalManual - totalDebt;
+  // Pension: live value (shares × price) when the entry has shares + priceSymbol and a price came back, otherwise the fixed valueSEK
+  const pensionRows = holdingsData.filter(h => h.type === "pension").map((h, i) => {
+    const p     = h.priceSymbol ? prices[`pension:${h.priceSymbol}`] : null;
+    const isLive = p?.priceSEK != null && h.shares > 0;
+    return {
+      ...h, id: `pension-${i}`,
+      color: COLORS[(enriched.length + realEstateRows.length + manualRows.length + i) % COLORS.length],
+      valueSEK: isLive ? h.shares * p.priceSEK : (h.valueSEK ?? 0),
+      isLive, priceSEK: p?.priceSEK ?? null, change: p?.change ?? null, asOf: p?.asOf ?? null,
+    };
+  });
+  const totalPension    = pensionRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+  const netWorth        = totalValue + totalRealEstate + totalManual + totalPension - totalDebt;
   const liveNetWorth    = whatIfActive
-    ? holdings.reduce((sum, h) => sum + h.shares * (livePrices[getPriceKey(h)]?.priceSEK ?? 0), 0) + totalRealEstate + totalManual - totalDebt
+    ? holdings.reduce((sum, h) => sum + h.shares * (livePrices[getPriceKey(h)]?.priceSEK ?? 0), 0) + totalRealEstate + totalManual + totalPension - totalDebt
     : netWorth;
   const whatIfDelta     = netWorth - liveNetWorth;
 
   // ── Allocation: grouped by category, with positions inside each ─────────────
   // Use costSEK as fallback when live prices haven't loaded yet
   const investedValue   = enriched.reduce((s, h) => s + (h.valueSEK ?? h.costSEK ?? 0), 0);
-  const allocationTotal = investedValue + totalRealEstate + totalManual;
+  const allocationTotal = investedValue + totalRealEstate + totalManual + totalPension;
 
   const categoryGroups = (() => {
     const cats = new Map();
@@ -1702,6 +1741,9 @@ export default function App() {
     for (const h of manualRows) {
       const cat = h.category ?? "Other";
       if ((h.valueSEK ?? 0) > 0) addToCategory(cat, h.name, h.valueSEK, h.color);
+    }
+    for (const h of pensionRows) {
+      if ((h.valueSEK ?? 0) > 0) addToCategory(getCategory(h), h.name, h.valueSEK, h.color);
     }
     // Sort positions within each category by value
     for (const g of cats.values()) g.positions.sort((a, b) => b.valueSEK - a.valueSEK);
@@ -1840,6 +1882,78 @@ export default function App() {
       </table></div>
     </div>
   );
+
+  // ── Pension table ─────────────────────────────────────────────────────────
+  const PensionTable = ({ rows }) => {
+    const costRows  = rows.filter(h => h.costSEK != null);
+    const totalCost = costRows.reduce((s, h) => s + h.costSEK, 0);
+    const costValue = costRows.reduce((s, h) => s + (h.valueSEK ?? 0), 0);
+    const totalGain = costValue - totalCost;
+    return (
+      <div style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(232,121,249,0.18)", borderRadius: 20, overflow: "hidden", marginBottom: 18 }}>
+        <div style={{ padding: "16px 24px 13px", borderBottom: "1px solid rgba(255,255,255,0.06)", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+          <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Pension</h2>
+          <span style={{ fontSize: 10, color: "#e879f9" }}>
+            {fmtSEK(totalPension)} total
+            {totalCost > 0 && (
+              <span style={{ color: totalGain >= 0 ? "#22d3a5" : "#f87171", marginLeft: 8 }}>
+                {totalGain >= 0 ? "+" : "−"}{fmtSEK(Math.abs(totalGain))} ({fmtPct((totalGain / totalCost) * 100)})
+              </span>
+            )}
+          </span>
+        </div>
+        <div className="table-wrap"><table style={{ width: "100%", borderCollapse: "collapse", minWidth: 620 }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid rgba(255,255,255,0.05)" }}>
+              {["Fund", "Account", "Value", "Invested", "Gain / Loss", "Share", "Notes"].map(col => (
+                <th key={col} style={{ padding: "9px 14px", textAlign: "left", fontSize: 9, letterSpacing: "0.12em", textTransform: "uppercase", color: "#374151", fontWeight: 700 }}>{col}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map(h => {
+              const gain    = h.valueSEK != null && h.costSEK != null ? h.valueSEK - h.costSEK : null;
+              const gainPct = gain != null && h.costSEK ? (gain / h.costSEK) * 100 : null;
+              const isPos   = (gain ?? 0) >= 0;
+              const share   = totalPension > 0 ? ((h.valueSEK ?? 0) / totalPension) * 100 : 0;
+              return (
+                <tr key={h.id} style={{ borderBottom: "1px solid rgba(255,255,255,0.04)" }}>
+                  <td style={{ padding: "12px 14px" }}>
+                    <div style={{ display: "flex", alignItems: "center", gap: 9 }}>
+                      <div style={{ width: 30, height: 30, borderRadius: 8, fontSize: 14, display: "flex", alignItems: "center", justifyContent: "center", background: `${h.color}22`, flexShrink: 0 }}>🏦</div>
+                      <div>
+                        <div style={{ fontWeight: 600, fontSize: 12 }}>{h.name}</div>
+                        {h.isLive && (
+                          <div style={{ fontSize: 10, color: "#4b5563", marginTop: 1 }}>
+                            {h.shares.toLocaleString("sv-SE")} units × {fmtSEKFull(h.priceSEK)}
+                            {h.change != null && <span style={{ color: h.change >= 0 ? "#22d3a5" : "#f87171", marginLeft: 5 }}>{fmtPct(h.change)}{staleDayLabel(h.asOf) ? ` (${staleDayLabel(h.asOf)})` : ""}</span>}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </td>
+                  <td style={{ padding: "12px 14px" }}>
+                    {h.account ? <span style={{ fontSize: 10, color: "#6b7280", background: "rgba(255,255,255,0.06)", padding: "2px 7px", borderRadius: 5 }}>{h.account}</span> : <span style={{ color: "#374151", fontSize: 11 }}>—</span>}
+                  </td>
+                  <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, fontWeight: 600 }}>{fmtSEK(h.valueSEK)}</td>
+                  <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 12, color: "#6b7280" }}>{h.costSEK != null ? fmtSEK(h.costSEK) : "—"}</td>
+                  <td style={{ padding: "12px 14px" }}>
+                    {gain != null
+                      ? <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, fontWeight: 600, color: isPos ? "#22d3a5" : "#f87171", background: isPos ? "rgba(34,211,165,0.1)" : "rgba(248,113,113,0.1)", padding: "2px 7px", borderRadius: 5 }}>
+                          {isPos ? "+" : ""}{fmtSEK(gain)} ({fmtPct(gainPct)})
+                        </span>
+                      : <span style={{ fontSize: 11, color: "#374151" }}>—</span>}
+                  </td>
+                  <td style={{ padding: "12px 14px", fontFamily: "'DM Mono',monospace", fontSize: 11, color: "#9ca3af" }}>{share.toFixed(1)}%</td>
+                  <td style={{ padding: "12px 14px", fontSize: 11, color: "#6b7280" }}>{h.notes ?? "—"}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table></div>
+      </div>
+    );
+  };
 
   // ── Indexes table ─────────────────────────────────────────────────────────
   const IndexesTable = () => {
@@ -2261,7 +2375,7 @@ export default function App() {
             </>
           )} accent={totalGain >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading && totalValue === 0} />
           <MetricCard label="Day's P&L"    value={fmtSEK(dayChange)}  sub={fmtPct(totalValue > 0 ? dayChange / totalValue * 100 : 0) + " " + dayLabel} accent={dayChange >= 0 ? "#22d3a5" : "#f87171"} loading={isLoading} />
-          <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
+          <MetricCard label="Total Debt"   value={fmtSEK(totalDebt)}  sub={`${debtRows.length} liabilities · ${(totalValue + totalRealEstate + totalManual + totalPension) > 0 ? ((totalDebt / (totalValue + totalRealEstate + totalManual + totalPension)) * 100).toFixed(1) + "% of assets" : "—"}`} accent="#f87171" />
         </div>
 
         <div className="main-grid">
@@ -2272,6 +2386,7 @@ export default function App() {
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
             {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
             {manualRows.length     > 0 && <ManualTable rows={manualRows} />}
+            {pensionRows.length    > 0 && <PensionTable rows={pensionRows} />}
             <IndexesTable />
           </div>
 
