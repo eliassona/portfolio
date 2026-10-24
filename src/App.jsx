@@ -195,6 +195,7 @@ const INDEXES = [
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
   { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
+  { symbol: "^MOVE",   name: "MOVE Index",     group: "US" },
   { symbol: "^OMX",       name: "OMX Stockholm",  group: "Nordic" },
   { symbol: "^OMXC25",    name: "OMX Copenhagen", group: "Nordic" },
   { symbol: "SE10Y_BOND", name: "Sweden 10Y",     group: "Nordic" },
