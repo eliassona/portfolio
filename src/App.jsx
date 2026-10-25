@@ -195,6 +195,7 @@ const INDEXES = [
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
   { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
+  { symbol: "^MOVE",   name: "MOVE Index",     group: "US" },
   { symbol: "^OMX",       name: "OMX Stockholm",  group: "Nordic" },
   { symbol: "^OMXC25",    name: "OMX Copenhagen", group: "Nordic" },
   { symbol: "SE10Y_BOND", name: "Sweden 10Y",     group: "Nordic" },
@@ -2384,9 +2385,9 @@ export default function App() {
             {cryptoRows.length    > 0 && <HoldingsTable rows={cryptoRows} title="Crypto"     sourceLabel="via mempool.space" />}
             {forexRows.length     > 0 && <HoldingsTable rows={forexRows}  title="Cash" sourceLabel="via Frankfurter" showSparkline={false} />}
             {realEstateRows.length > 0 && <RealEstateTable rows={realEstateRows} />}
-            {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
             {manualRows.length     > 0 && <ManualTable rows={manualRows} />}
             {pensionRows.length    > 0 && <PensionTable rows={pensionRows} />}
+            {debtRows.length       > 0 && <DebtTable rows={debtRows} />}
             <IndexesTable />
           </div>
 
