@@ -928,6 +928,112 @@ function IndexChartModal({ index, onClose }) {
   );
 }
 
+// ── Income projection modal ───────────────────────────────────────────────────
+// Month-by-month (or year-by-year, when the horizon is long) stacked view of monthly income, using each source's start/end dates.
+function IncomeProjectionModal({ rows, dividendAvg, onClose }) {
+  const [horizon, setHorizon] = useState("ALL");
+  const [withDiv, setWithDiv] = useState(true);
+  const [hover, setHover]     = useState(null);
+  useEffect(() => {
+    const handler = e => { if (e.key === "Escape") onClose(); };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [onClose]);
+
+  const fmt    = n => new Intl.NumberFormat("sv-SE", { style: "currency", currency: "SEK", maximumFractionDigits: 0 }).format(n);
+  const fmtCmp = n => new Intl.NumberFormat("sv-SE", { notation: "compact", maximumFractionDigits: 1 }).format(n);
+  const now    = new Date();
+  const first  = new Date(now.getFullYear(), now.getMonth(), 1);
+  const lastEvent = rows.flatMap(r => [r.startD, r.endD]).filter(Boolean).reduce((m, d) => (d > m ? d : m), first);
+  const allMonths = Math.min(480, Math.max(12, (lastEvent.getFullYear() - now.getFullYear()) * 12 + lastEvent.getMonth() - now.getMonth() + 13));
+  const months    = horizon === "ALL" ? allMonths : { "1Y": 12, "5Y": 60, "10Y": 120 }[horizon];
+
+  const series = rows.filter(r => r.sek != null).map((r, i) => ({
+    id: `s${r.key}`, name: r.name, color: COLORS[i % COLORS.length],
+    val: (mStart, mEnd) => (r.startD && r.startD > mEnd) || (r.endD && r.endD < mStart) ? 0 : r.sek,
+  }));
+  if (withDiv && dividendAvg > 0) series.push({ id: "div", name: "Dividends", color: "#a78bfa", val: () => dividendAvg });
+
+  // Bucket the months: one bar per month up to 3 years, otherwise one bar per calendar year (average per month)
+  const yearly = months > 36;
+  const buckets = [];
+  for (let k = 0; k < months; k++) {
+    const mStart = new Date(now.getFullYear(), now.getMonth() + k, 1);
+    const mEnd   = new Date(now.getFullYear(), now.getMonth() + k + 1, 0);
+    const label  = yearly ? String(mStart.getFullYear()) : `${mStart.getFullYear()}-${String(mStart.getMonth() + 1).padStart(2, "0")}`;
+    let b = buckets[buckets.length - 1];
+    if (!b || b.label !== label) { b = { label, n: 0, sums: series.map(() => 0) }; buckets.push(b); }
+    b.n++;
+    series.forEach((s, i) => { b.sums[i] += s.val(mStart, mEnd); });
+  }
+  buckets.forEach(b => { b.vals = b.sums.map(v => v / b.n); b.total = b.vals.reduce((x, y) => x + y, 0); });
+  const maxTotal = Math.max(1, ...buckets.map(b => b.total));
+
+  const W = 520, H = 200, PAD = { t: 10, r: 10, b: 28, l: 48 };
+  const cW = W - PAD.l - PAD.r, cH = H - PAD.t - PAD.b;
+  const slot = cW / buckets.length, barW = Math.max(1, slot * 0.78);
+  const yOf  = v => PAD.t + cH - (v / maxTotal) * cH;
+  const labelEvery = Math.ceil(buckets.length / 6);
+  const sel = buckets[hover ?? 0];
+
+  return (
+    <div onClick={onClose} style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.7)", zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", padding: 16 }}>
+      <div onClick={e => e.stopPropagation()} style={{ background: "#0f1623", border: "1px solid rgba(255,255,255,0.1)", borderRadius: 20, padding: 24, width: "100%", maxWidth: 600, maxHeight: "90vh", overflowY: "auto" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 18 }}>
+          <div>
+            <div style={{ fontWeight: 700, fontSize: 18 }}>Income projection</div>
+            <div style={{ fontSize: 11, color: "#4b5563", marginTop: 2 }}>{yearly ? "Average per month, by year" : "Per month"} · based on start / end dates</div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.06)", border: "none", borderRadius: 8, padding: "4px 10px", color: "#6b7280", fontSize: 11, cursor: "pointer" }}>✕ Close</button>
+        </div>
+        <div style={{ display: "flex", gap: 6, marginBottom: 16, alignItems: "center" }}>
+          {["1Y", "5Y", "10Y", "ALL"].map(t => (
+            <button key={t} onClick={() => { setHorizon(t); setHover(null); }} style={{ flex: 1, padding: "6px 0", borderRadius: 8, border: "none", fontSize: 11, fontWeight: 600, cursor: "pointer", background: horizon === t ? "#22d3a5" : "rgba(255,255,255,0.06)", color: horizon === t ? "#080c14" : "#6b7280", fontFamily: "'DM Sans',sans-serif" }}>{t === "ALL" ? "All" : t}</button>
+          ))}
+          <button onClick={() => setWithDiv(v => !v)} style={{ padding: "6px 10px", borderRadius: 8, border: "none", fontSize: 10, fontWeight: 600, cursor: "pointer", background: withDiv ? "rgba(167,139,250,0.2)" : "rgba(255,255,255,0.06)", color: withDiv ? "#a78bfa" : "#6b7280", fontFamily: "'DM Sans',sans-serif", whiteSpace: "nowrap" }}>+ Dividends</button>
+        </div>
+        {sel && (
+          <div style={{ marginBottom: 10, minHeight: 38 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+              <span style={{ fontSize: 11, color: "#6b7280" }}>{sel.label}{yearly ? " (avg / month)" : ""}</span>
+              <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 14, fontWeight: 700, color: "#22d3a5" }}>{fmt(sel.total)}</span>
+            </div>
+            <div style={{ display: "flex", flexWrap: "wrap", gap: "2px 12px", marginTop: 4 }}>
+              {series.map((s, i) => sel.vals[i] > 0.5 && (
+                <span key={s.id} style={{ fontSize: 10, color: "#9ca3af" }}><span style={{ display: "inline-block", width: 7, height: 7, borderRadius: 2, background: s.color, marginRight: 4 }} />{s.name} {fmt(sel.vals[i])}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        <svg viewBox={`0 0 ${W} ${H}`} style={{ width: "100%", height: "auto", display: "block" }} onMouseLeave={() => setHover(null)}>
+          {[0, 0.33, 0.67, 1].map((p, i) => <line key={i} x1={PAD.l} x2={W - PAD.r} y1={PAD.t + cH - p * cH} y2={PAD.t + cH - p * cH} stroke="rgba(255,255,255,0.06)" strokeWidth="1" />)}
+          {[0, 0.33, 0.67, 1].map((p, i) => <text key={i} x={PAD.l - 6} y={PAD.t + cH - p * cH + 4} textAnchor="end" fontSize="9" fill="#4b5563">{fmtCmp(p * maxTotal)}</text>)}
+          {buckets.map((b, bi) => {
+            let acc = 0;
+            const x = PAD.l + bi * slot + (slot - barW) / 2;
+            return (
+              <g key={b.label} onMouseEnter={() => setHover(bi)} onClick={() => setHover(bi)} style={{ cursor: "pointer" }} opacity={hover == null || hover === bi ? 1 : 0.45}>
+                <rect x={PAD.l + bi * slot} y={PAD.t} width={slot} height={cH} fill="transparent" />
+                {series.map((s, i) => {
+                  const h = (b.vals[i] / maxTotal) * cH;
+                  const y = yOf(acc + b.vals[i]);
+                  acc += b.vals[i];
+                  return h > 0 ? <rect key={s.id} x={x} y={y} width={barW} height={h} fill={s.color} /> : null;
+                })}
+                {bi % labelEvery === 0 && <text x={x + barW / 2} y={H - 8} textAnchor="middle" fontSize="9" fill="#4b5563">{b.label}</text>}
+              </g>
+            );
+          })}
+        </svg>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: "4px 14px", marginTop: 12 }}>
+          {series.map(s => <span key={s.id} style={{ fontSize: 10, color: "#9ca3af", display: "flex", alignItems: "center", gap: 5 }}><span style={{ width: 8, height: 8, borderRadius: 2, background: s.color, display: "inline-block" }} />{s.name}</span>)}
+        </div>
+        <p style={{ margin: "12px 0 0", fontSize: 10, color: "#374151" }}>Foreign-currency amounts are converted at today's rate. Dividends are shown as a flat monthly average.</p>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const holdings = holdingsData
     .filter(h => !["realestate", "debt", "manual", "pension"].includes(h.type))
@@ -958,6 +1064,7 @@ export default function App() {
   const [allocationLimits, setAllocationLimits] = useState({}); // per-category min/max %, configurable via config.json
   const [displayCurrency, setDisplayCurrency] = useState("SEK");   // display.currency in config.json
   const [sinceStart, setSinceStart]           = useState(null);    // sinceStart { amount, currency } in config.json
+  const [showIncomeModal, setShowIncomeModal] = useState(false);
   const [monthlyIncome, setMonthlyIncome] = useState([]);    // monthlyIncome [{ name, amount, currency }] in config.json
   const [cagrWhatIf, setCagrWhatIf]           = useState(null);    // what-if CAGR in % p.a. (null = off)
   const [editingCagr, setEditingCagr]         = useState(false);
@@ -1777,11 +1884,37 @@ export default function App() {
     })();
 
   // ── Monthly income (config.json → monthlyIncome) ──────────────────────────
+  // Each source may have optional start / end ("YYYY-MM-DD" or "YYYY-MM"; month-only covers the whole month).
+  // No end date = ongoing, no start date = already started. Only sources active today count towards the total.
+  const parseIncomeDate = (str, isEnd) => {
+    const m = /^(\d{4})-(\d{2})(?:-(\d{2}))?$/.exec(String(str ?? "").trim());
+    if (!m) return null;
+    const [, y, mo, d] = m;
+    if (d) return new Date(+y, +mo - 1, +d);
+    return isEnd ? new Date(+y, +mo, 0) : new Date(+y, +mo - 1, 1);
+  };
+  const todayMid = (() => { const t = new Date(); t.setHours(0, 0, 0, 0); return t; })();
   const incomeRows = monthlyIncome.map((s, i) => {
-    const rate = sekPerUnit(s.currency);
-    return { key: i, name: s.name ?? "Income", amount: s.amount, currency: s.currency ?? "SEK", sek: rate != null ? s.amount * rate : null };
-  });
-  const totalIncomeSEK  = incomeRows.reduce((sum, r) => sum + (r.sek ?? 0), 0);
+    const rate   = sekPerUnit(s.currency);
+    const startD = parseIncomeDate(s.start, false);
+    const endD   = parseIncomeDate(s.end, true);
+    const status = startD && startD > todayMid ? "upcoming" : endD && endD < todayMid ? "ended" : "active";
+    return { key: i, name: s.name ?? "Income", amount: s.amount, currency: s.currency ?? "SEK", sek: rate != null ? s.amount * rate : null,
+             start: s.start ?? null, end: s.end ?? null, startD, endD, status };
+  }).sort((a, b) => (a.status === "active" ? 0 : 1) - (b.status === "active" ? 0 : 1));
+  const totalIncomeSEK  = incomeRows.filter(r => r.status === "active").reduce((sum, r) => sum + (r.sek ?? 0), 0);
+  // Perpetual = no end date. "Active" ones pay today; "upcoming" ones are perpetual but haven't started yet.
+  const perpetualRows        = incomeRows.filter(r => !r.endD);
+  const perpetualActiveSEK   = perpetualRows.filter(r => r.status === "active").reduce((s, r) => s + (r.sek ?? 0), 0);
+  const perpetualUpcomingSEK = perpetualRows.filter(r => r.status === "upcoming").reduce((s, r) => s + (r.sek ?? 0), 0);
+  // Next time the income changes (a source starting or ending) — shown under the card
+  const nextIncomeChange = incomeRows.flatMap(r => {
+    if (r.sek == null) return [];
+    const ev = [];
+    if (r.status === "upcoming") ev.push({ date: r.startD, label: r.start, verb: "starts", name: r.name, delta: r.sek });
+    if (r.endD && r.status !== "ended") ev.push({ date: new Date(r.endD.getFullYear(), r.endD.getMonth(), r.endD.getDate() + 1), label: r.end, verb: "ends", name: r.name, delta: -r.sek });
+    return ev;
+  }).sort((a, b) => a.date - b.date)[0] ?? null;
   const totalMonthlySEK = totalIncomeSEK + monthlyDividendAvg;
 
   // ── Real estate table ─────────────────────────────────────────────────────
@@ -2571,13 +2704,26 @@ export default function App() {
             {(incomeRows.length > 0 || monthlyDividendAvg > 0) && (
               <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "190ms" }}>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
-                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Monthly Income</h2>
+                  <div style={{ display: "flex", alignItems: "baseline", gap: 10 }}>
+                    <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Monthly Income</h2>
+                    <button onClick={() => setShowIncomeModal(true)} style={{ background: "none", border: "none", padding: 0, color: "#6b7280", fontSize: 10, fontWeight: 600, cursor: "pointer", fontFamily: "'DM Sans',sans-serif" }}>Projection ↗</button>
+                  </div>
                   <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(totalMonthlySEK)}</span>
                 </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
                   {incomeRows.map(r => (
-                    <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
-                      <span style={{ fontSize: 12, fontWeight: 600 }}>{r.name}</span>
+                    <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px", opacity: r.status === "active" ? 1 : 0.5 }}>
+                      <div>
+                        <div style={{ fontSize: 12, fontWeight: 600 }}>{r.name}</div>
+                        <div style={{ fontSize: 9, marginTop: 1, color: r.status === "upcoming" ? "#f59e0b" : "#4b5563" }}>
+                          {r.status === "upcoming" ? `Starts ${r.start}${r.end ? ` → ${r.end}` : " · ongoing"}`
+                            : r.status === "ended"  ? `Ended ${r.end}`
+                            : r.start && r.end ? `${r.start} → ${r.end}`
+                            : r.start ? `Since ${r.start} · ongoing`
+                            : r.end   ? `Until ${r.end}`
+                            : "Ongoing"}
+                        </div>
+                      </div>
                       <div style={{ textAlign: "right" }}>
                         <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(r.sek)}</div>
                         {r.currency !== "SEK" && <div style={{ fontSize: 9, color: "#4b5563", marginTop: 1 }}>{new Intl.NumberFormat("sv-SE", { style: "currency", currency: r.currency, maximumFractionDigits: 0 }).format(r.amount)}</div>}
@@ -2592,6 +2738,26 @@ export default function App() {
                     <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#a78bfa" }}>{isLoading && dividends.length === 0 ? "…" : fmtSEK(monthlyDividendAvg)}</span>
                   </div>
                 </div>
+                {perpetualRows.length > 0 && (
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 10, paddingTop: 8 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                      <div>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: "#6b7280" }}>Perpetual · no end date</span>
+                        <div style={{ fontSize: 9, color: "#4b5563", marginTop: 1 }}>
+                          incl. dividends {fmtSEK(perpetualActiveSEK + monthlyDividendAvg)}
+                          {perpetualUpcomingSEK > 0 && <span style={{ color: "#f59e0b" }}> · +{fmtSEK(perpetualUpcomingSEK)} when future ones start</span>}
+                        </div>
+                      </div>
+                      <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(perpetualActiveSEK)}</span>
+                    </div>
+                  </div>
+                )}
+                {nextIncomeChange && (
+                  <div style={{ borderTop: "1px solid rgba(255,255,255,0.07)", marginTop: 10, paddingTop: 8, fontSize: 10, color: "#6b7280" }}>
+                    Next change: <span style={{ color: "#d1d5db", fontWeight: 600 }}>{nextIncomeChange.name}</span> {nextIncomeChange.verb} {nextIncomeChange.label}
+                    {" "}<span style={{ color: nextIncomeChange.delta >= 0 ? "#22d3a5" : "#f87171", fontWeight: 600 }}>({nextIncomeChange.delta >= 0 ? "+" : "−"}{fmtSEK(Math.abs(nextIncomeChange.delta))}/mo)</span>
+                  </div>
+                )}
               </div>
             )}
 
@@ -2781,6 +2947,9 @@ export default function App() {
       )}
       {selectedIndex && (
         <IndexChartModal index={selectedIndex} onClose={() => setSelectedIndex(null)} />
+      )}
+      {showIncomeModal && (
+        <IncomeProjectionModal rows={incomeRows} dividendAvg={monthlyDividendAvg} onClose={() => setShowIncomeModal(false)} />
       )}
     </>
   );
