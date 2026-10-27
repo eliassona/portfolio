@@ -195,7 +195,6 @@ const INDEXES = [
   { symbol: "^IXIC",   name: "Nasdaq",         group: "US" },
   { symbol: "^GSPC",   name: "S&P 500",        group: "US" },
   { symbol: "^TNX",    name: "10Y Treasury",   group: "US" },
-  { symbol: "^MOVE",   name: "MOVE Index",     group: "US" },
   { symbol: "^OMX",       name: "OMX Stockholm",  group: "Nordic" },
   { symbol: "^OMXC25",    name: "OMX Copenhagen", group: "Nordic" },
   { symbol: "SE10Y_BOND", name: "Sweden 10Y",     group: "Nordic" },
@@ -959,6 +958,7 @@ export default function App() {
   const [allocationLimits, setAllocationLimits] = useState({}); // per-category min/max %, configurable via config.json
   const [displayCurrency, setDisplayCurrency] = useState("SEK");   // display.currency in config.json
   const [sinceStart, setSinceStart]           = useState(null);    // sinceStart { amount, currency } in config.json
+  const [monthlyIncome, setMonthlyIncome] = useState([]);    // monthlyIncome [{ name, amount, currency }] in config.json
   const [cagrWhatIf, setCagrWhatIf]           = useState(null);    // what-if CAGR in % p.a. (null = off)
   const [editingCagr, setEditingCagr]         = useState(false);
   const [cagrText, setCagrText]               = useState("");
@@ -1569,6 +1569,7 @@ export default function App() {
       if (cfg.allocationLimits) setAllocationLimits(cfg.allocationLimits);
       if (cfg.display?.currency) setDisplayCurrency(cfg.display.currency);
       if (cfg.sinceStart?.amount > 0) setSinceStart({ amount: cfg.sinceStart.amount, currency: cfg.sinceStart.currency ?? "SEK", date: cfg.sinceStart.date ?? null });
+      if (Array.isArray(cfg.monthlyIncome)) setMonthlyIncome(cfg.monthlyIncome.filter(s => s?.amount > 0));
       if (cfg.finnhubKey)       { setFinnhubKey(cfg.finnhubKey); finnhubKeyRef.current = cfg.finnhubKey; }
       // Pass fiat symbols directly into fetchAll so we don't depend on state being set yet
       // (also include the display currency and the "since start" currency so their rates get fetched)
@@ -1750,6 +1751,38 @@ export default function App() {
     for (const g of cats.values()) g.positions.sort((a, b) => b.valueSEK - a.valueSEK);
     return [...cats.values()].sort((a, b) => b.valueSEK - a.valueSEK);
   })();
+
+  // Average monthly dividends (annualised per holding ÷ 12) — shared by the Upcoming Dividends and Monthly Income cards
+    const monthlyDividendAvg = (() => {
+      let annual = 0;
+      const seen = new Set();
+      for (const h of holdings.filter(hh => hh.type === "stock")) {
+        const sym = h.priceSymbol ?? h.symbol;
+        if (h.dividendPerShare) {
+          // Manual dividend
+          const freq = h.dividendFrequency ?? "quarterly";
+          const paymentsPerYear = freq === "monthly" ? 12 : freq === "biweekly" ? 26 : 4;
+          annual += h.dividendPerShare * h.shares * paymentsPerYear * usdSekRate;
+        } else if (!seen.has(sym)) {
+          // Finnhub dividend — use amountUSD from dividends array if available
+          seen.add(sym);
+          const finnhubDiv = dividends.find(d => d.symbol === sym && d.source !== "manual");
+          if (finnhubDiv) {
+            const totalShares = holdings.filter(hh => hh.type === "stock" && (hh.priceSymbol ?? hh.symbol) === sym).reduce((s, hh) => s + hh.shares, 0);
+            annual += (finnhubDiv.amount ?? 0) * totalShares * 4 * usdSekRate;
+          }
+        }
+      }
+      return annual / 12;
+    })();
+
+  // ── Monthly income (config.json → monthlyIncome) ──────────────────────────
+  const incomeRows = monthlyIncome.map((s, i) => {
+    const rate = sekPerUnit(s.currency);
+    return { key: i, name: s.name ?? "Income", amount: s.amount, currency: s.currency ?? "SEK", sek: rate != null ? s.amount * rate : null };
+  });
+  const totalIncomeSEK  = incomeRows.reduce((sum, r) => sum + (r.sek ?? 0), 0);
+  const totalMonthlySEK = totalIncomeSEK + monthlyDividendAvg;
 
   // ── Real estate table ─────────────────────────────────────────────────────
   const RealEstateTable = ({ rows }) => (
@@ -2534,6 +2567,34 @@ export default function App() {
               );
             })()}
 
+            {/* Monthly income */}
+            {(incomeRows.length > 0 || monthlyDividendAvg > 0) && (
+              <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "190ms" }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", marginBottom: 12 }}>
+                  <h2 style={{ margin: 0, fontSize: 13, fontWeight: 600 }}>Monthly Income</h2>
+                  <span style={{ fontSize: 14, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#22d3a5" }}>{fmtSEK(totalMonthlySEK)}</span>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 7 }}>
+                  {incomeRows.map(r => (
+                    <div key={r.key} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
+                      <span style={{ fontSize: 12, fontWeight: 600 }}>{r.name}</span>
+                      <div style={{ textAlign: "right" }}>
+                        <div style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#d1d5db" }}>{fmtSEK(r.sek)}</div>
+                        {r.currency !== "SEK" && <div style={{ fontSize: 9, color: "#4b5563", marginTop: 1 }}>{new Intl.NumberFormat("sv-SE", { style: "currency", currency: r.currency, maximumFractionDigits: 0 }).format(r.amount)}</div>}
+                      </div>
+                    </div>
+                  ))}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "rgba(255,255,255,0.03)", borderRadius: 10, padding: "8px 12px" }}>
+                    <div>
+                      <div style={{ fontSize: 12, fontWeight: 600 }}>Dividends</div>
+                      <div style={{ fontSize: 9, color: "#4b5563", marginTop: 1 }}>~ monthly average</div>
+                    </div>
+                    <span style={{ fontSize: 12, fontWeight: 700, fontFamily: "'DM Mono',monospace", color: "#a78bfa" }}>{isLoading && dividends.length === 0 ? "…" : fmtSEK(monthlyDividendAvg)}</span>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {/* Upcoming dividends */}
             <div className={`fade-in ${animated ? "visible" : ""}`} style={{ background: "rgba(255,255,255,0.025)", border: "1px solid rgba(255,255,255,0.07)", borderRadius: 20, padding: "18px 22px", transitionDelay: "200ms" }}>
               <h2 style={{ margin: "0 0 14px", fontSize: 13, fontWeight: 600 }}>Upcoming Dividends</h2>
@@ -2563,31 +2624,7 @@ export default function App() {
                     const rows = Object.values(bySymbol).sort((a, b) => new Date(a.exDate) - new Date(b.exDate));
                     const grandTotal = rows.reduce((s, d) => s + d.payoutSEK, 0);
 
-                    // Monthly average: annualise each holding's dividend then divide by 12
-                    // Manual: use dividendFrequency to determine payments/year
-                    // Finnhub: assume quarterly (4x/year)
-                    const monthlyAvg = (() => {
-                      let annual = 0;
-                      const seen = new Set();
-                      for (const h of holdings.filter(hh => hh.type === "stock")) {
-                        const sym = h.priceSymbol ?? h.symbol;
-                        if (h.dividendPerShare) {
-                          // Manual dividend
-                          const freq = h.dividendFrequency ?? "quarterly";
-                          const paymentsPerYear = freq === "monthly" ? 12 : freq === "biweekly" ? 26 : 4;
-                          annual += h.dividendPerShare * h.shares * paymentsPerYear * usdSekRate;
-                        } else if (!seen.has(sym)) {
-                          // Finnhub dividend — use amountUSD from dividends array if available
-                          seen.add(sym);
-                          const finnhubDiv = dividends.find(d => d.symbol === sym && d.source !== "manual");
-                          if (finnhubDiv) {
-                            const totalShares = holdings.filter(hh => hh.type === "stock" && (hh.priceSymbol ?? hh.symbol) === sym).reduce((s, hh) => s + hh.shares, 0);
-                            annual += (finnhubDiv.amount ?? 0) * totalShares * 4 * usdSekRate;
-                          }
-                        }
-                      }
-                      return annual / 12;
-                    })();
+                    const monthlyAvg = monthlyDividendAvg;
 
                     return <>
                       {rows.map(d => (

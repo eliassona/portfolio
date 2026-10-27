@@ -179,6 +179,7 @@ app.get('/api/config', (req, res) => {
     allocationLimits: config.allocationLimits ?? {},
     display:          config.display          ?? { currency: 'SEK' },
     sinceStart:       config.sinceStart       ?? null,
+    monthlyIncome:    config.monthlyIncome    ?? [],
   });
 });
 
